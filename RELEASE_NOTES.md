@@ -1,4 +1,4 @@
-Windows x64 portable trial v0.2.0-beta.1.
+Windows x64 portable trial v0.2.0-beta.2.
 
 - Extract the ZIP and run RespiratoryViewer.exe. Python, Codex and MCP are not required for waveform viewing or annotation.
 - Local CSV loading, pressure overlay and manual event annotation.

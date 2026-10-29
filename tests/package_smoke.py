@@ -1,6 +1,7 @@
 """Verify the Windows EXE independently with synthetic data and temporary storage."""
 import json
 import math
+import runpy
 from pathlib import Path
 import socket
 import subprocess
@@ -30,7 +31,7 @@ def main():
                 except (OSError,urllib.error.URLError):
                     if process.poll() is not None or time.monotonic()>deadline:raise RuntimeError('EXE startup failed: '+process.communicate(timeout=5)[1].decode(errors='replace'))
                     time.sleep(.2)
-            assert health['app_version']=='0.2.0-beta.1'
+            assert health['app_version']==runpy.run_path(str(Path(__file__).resolve().parents[1]/'app_version.py'))['APP_VERSION']
             with client.open(f'http://127.0.0.1:{port}/') as r:assert 'export-automatic' in r.read().decode()
             rows=['time,流量,漏气量,压力,运行状态']
             for i in range(150*25):
