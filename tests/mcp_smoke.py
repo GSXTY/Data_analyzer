@@ -49,6 +49,17 @@ async def main():
                     viewer.event_store.write(meta,packet['revision'],packet['events'])
                     repeat=await call('detect_events',dict(file_id=fid));assert repeat['added']==0
                     assert next(e for e in viewer.event_store.read(fid)['events'] if e['source']=='detector')['status']=='ignored'
+                    device=await call('detect_events',dict(file_id=fid,profile='device_candidates',reduction_ratio=.7))
+                    assert device['settings']['profile']=='device_candidates'
+                    assert device['device_metrics']['central_apnea_duration_seconds'] is None
+                    assert device['device_metrics']['ahi'] is None
+                    automatic=viewer.event_store.feedback(meta,device['packet']['run_id'],'automatic')
+                    assert automatic['device_metrics']==device['device_metrics']
+                    subset=await call('detect_events',dict(file_id=fid,profile='device_candidates',reduction_ratio=.7,event_types=['数据缺失']))
+                    assert subset['settings']['event_types']==['数据缺失']
+                    assert subset['device_metrics']['by_type']['流量波动减弱候选']['count'] is None
+                    automatic=viewer.event_store.feedback(meta,subset['packet']['run_id'],'automatic')
+                    assert all(e['type']=='数据缺失' for e in automatic['events'])
                     print('PASS: stdio + 7 tools + shared events + automatic scan + duplicate/ignored preservation + reviewed/file-switch protection',flush=True)
         finally:
             server.shutdown();server.server_close()

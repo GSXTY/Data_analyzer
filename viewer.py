@@ -15,8 +15,9 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pandas as pd
 from event_store import EventStore, Conflict
-from detector import detect
+from detector import detect, DETECTABLE_TYPES, VERSION
 from app_version import APP_VERSION, APP_ID
+from feedback_export import scoped_review,save_package,folder_for
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, '_MEIPASS', ROOT))
@@ -25,6 +26,7 @@ DEFAULT = os.environ.get('RESPIRATORY_CSV','')
 
 class Recording:
     def __init__(self, raw, name):
+        self.raw_csv=raw
         for encoding in ('utf-8-sig', 'gb18030'):
             try:
                 df = pd.read_csv(io.BytesIO(raw), encoding=encoding)
@@ -181,15 +183,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'error': '请先打开 CSV 文件。'}, 400)
             if url.path == '/api/meta':
                 return self.send(current.meta)
+            if url.path == '/api/device-summary':
+                if parse_qs(url.query).get('file_id',[''])[0]!=current.meta['file_id']:
+                    return self.send({'error':'文件已切换'},409)
+                for scan in event_store.scans(current.meta['file_id']):
+                    if scan['settings'].get('profile')=='device_candidates':
+                        snapshot=event_store.feedback(current.meta,scan['run_id'],'automatic')
+                        return self.send(dict(run_id=scan['run_id'],device_metrics=snapshot.get('device_metrics')))
+                return self.send(dict(device_metrics=None))
             if url.path == '/api/events':
                 file_id = parse_qs(url.query).get('file_id', [''])[0]
                 if file_id != current.meta['file_id']:
                     return self.send({'error': '当前文件已变更，请重新读取文件信息'}, 409)
                 return self.send(event_store.read(file_id))
             if url.path == '/api/scans':
-                if parse_qs(url.query).get('file_id',[''])[0]!=current.meta['file_id']:
+                q=parse_qs(url.query)
+                if q.get('file_id',[''])[0]!=current.meta['file_id']:
                     return self.send({'error':'文件已切换'},409)
-                return self.send(dict(scans=event_store.scans(current.meta['file_id'])))
+                return self.send(event_store.scan_page(current.meta['file_id'],int(q.get('limit',['10'])[0]),int(q.get('offset',['0'])[0]),q.get('q',[''])[0],q.get('state',['active'])[0],q.get('selected',[''])[0]))
             if url.path == '/api/wave':
                 q = parse_qs(url.query)
                 if 'file_id' in q and q['file_id'][0] != current.meta['file_id']:
@@ -209,6 +220,50 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin != 'http://' + self.headers.get('Host', ''):
             return self.send({'error': '不允许跨站请求'}, 403)
         try:
+            if urlparse(self.path).path=='/api/feedback/open-folder':
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<1000:raise ValueError('请求大小无效')
+                args=json.loads(self.rfile.read(length))
+                with recording_lock:
+                    current=recording
+                    if current is None or args.get('file_id')!=current.meta['file_id']:raise Conflict('文件已切换')
+                    folder=folder_for(Path(event_store.path).parent/'feedback_exports',current.meta).resolve()
+                if not folder.is_dir():raise ValueError('尚未保存反馈文件夹')
+                if os.name!='nt':raise ValueError('请复制保存路径后在文件管理器打开')
+                os.startfile(str(folder))
+                return self.send(dict(opened=True))
+            if urlparse(self.path).path in ('/api/feedback/prepare','/api/feedback/export'):
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<20000:raise ValueError('反馈请求大小无效')
+                args=json.loads(self.rfile.read(length))
+                with recording_lock:
+                    current=recording
+                    if current is None or args.get('file_id')!=current.meta['file_id']:raise Conflict('文件已切换')
+                    automatic=event_store.feedback(current.meta,args.get('run_id'),'automatic')
+                    packet=event_store.read(current.meta['file_id'])
+                    reviewed=scoped_review(current.meta,automatic,packet,args.get('reviewer'),args.get('reviewed_range'),args.get('reviewed_types'),args.get('review_mode'))
+                    root=Path(event_store.path).parent/'feedback_exports'
+                    if urlparse(self.path).path.endswith('/prepare'):
+                        return self.send(dict(folder=str(folder_for(root,current.meta).resolve()),revision=packet['revision'],file_name=current.meta['name'],
+                             run_id=automatic['run_id'],reviewer=reviewed['reviewer'],reviewed_range=reviewed['reviewed_range'],reviewed_types=reviewed['reviewed_types'],review_mode=reviewed['review_mode'],
+                             event_count=len(reviewed['events']),confirmed_count=len(reviewed['training_scope']['positive_event_ids']),boundary_count=len(reviewed['boundary_events']),estimated_count=len(reviewed['estimated_time_events']),pending_count=len(reviewed['training_scope']['pending_event_ids'])))
+                    if isinstance(args.get('expected_revision'),bool) or args.get('expected_revision')!=packet['revision']:raise Conflict('标记已变化，请重新预览并确认后导出')
+                return self.send(save_package(root,current.meta,current.raw_csv,automatic,reviewed,args.get('confirmed',False)))
+            if urlparse(self.path).path in ('/api/scans/edit','/api/scans/match'):
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<20000:raise ValueError('批次请求大小无效')
+                args=json.loads(self.rfile.read(length))
+                with recording_lock:
+                    current=recording
+                    if current is None or args.get('file_id')!=current.meta['file_id']:raise Conflict('文件已切换')
+                    if urlparse(self.path).path.endswith('/edit'):
+                        return self.send(event_store.edit_scan(current.meta['file_id'],args.get('run_id'),args.get('title'),args.get('archived')))
+                    profile=args.get('profile','engineering');types=args.get('event_types')
+                    if profile not in DETECTABLE_TYPES:raise ValueError('检测方案无效')
+                    if types is not None and (not isinstance(types,list) or not types or any(t not in DETECTABLE_TYPES[profile] for t in types)):raise ValueError('检测类型无效')
+                    settings=dict(version=VERSION if profile=='engineering' else 'machine-flow-candidates-v2',profile=profile,
+                                  min_duration=args.get('min_duration',10),reduction_ratio=args.get('reduction_ratio',.3),event_types=types or list(DETECTABLE_TYPES[profile]))
+                    return self.send(dict(match=event_store.matching_scan(current.meta['file_id'],args.get('start',0),args.get('end',current.meta['raw_duration']),settings)))
             if urlparse(self.path).path == '/api/feedback':
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<20000:raise ValueError('反馈请求大小无效')
@@ -216,6 +271,9 @@ class Handler(BaseHTTPRequestHandler):
                 with recording_lock:
                     current=recording
                     if current is None or args.get('file_id')!=current.meta['file_id']:raise Conflict('文件已切换')
+                    if args.get('kind')=='reviewed' and 'reviewed_types' in args:
+                        automatic=event_store.feedback(current.meta,args.get('run_id'),'automatic')
+                        return self.send(scoped_review(current.meta,automatic,event_store.read(current.meta['file_id']),args.get('reviewer'),args.get('reviewed_range'),args.get('reviewed_types'),args.get('review_mode')))
                     return self.send(event_store.feedback(current.meta,args.get('run_id'),args.get('kind'),args.get('reviewer',''),args.get('reviewed_range')))
             if urlparse(self.path).path == '/api/detect':
                 length = int(self.headers.get('Content-Length', '0'))
@@ -230,7 +288,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not scan_lock.acquire(blocking=False):
                     raise Conflict('已有扫描正在进行，请等待完成')
                 try:
-                    result = detect(current,args.get('start',0),args.get('end'),args.get('min_duration',10),args.get('reduction_ratio',.3))
+                    result = detect(current,args.get('start',0),args.get('end'),args.get('min_duration',10),args.get('reduction_ratio',.3),args.get('profile','engineering'),args.get('event_types'))
                     saved=[];skipped=0;event_links={}
                     for e in result['events']:
                         duplicate=False
@@ -247,6 +305,7 @@ class Handler(BaseHTTPRequestHandler):
                         if recording is not current:raise Conflict('扫描期间文件已变化，本次未保存')
                         snapshot={k:result[k] for k in ('events','settings','scan_start','scan_end','warnings','analyzed_rows','eligible_seconds')}
                         snapshot['event_links']=event_links
+                        if 'device_metrics' in result:snapshot['device_metrics']=result['device_metrics']
                         packet=event_store.write(current.meta,previous['revision'],previous['events']+saved,scan=snapshot)
                     result.update(added=len(saved),skipped=skipped,detected_count=len(result['events']),packet=packet)
                     result.pop('events')

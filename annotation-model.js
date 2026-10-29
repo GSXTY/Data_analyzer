@@ -1,7 +1,7 @@
 /* Shared validation and persistence for manual waveform annotations. */
 (function(root){
  'use strict';
- const types=['疑似暂停','疑似低通气','漏气','波形异常','伪迹/干扰','其他','呼吸波动减弱','总漏气升高','数据缺失','信号异常'];
+ const types=['疑似暂停','疑似低通气','漏气','波形异常','伪迹/干扰','其他','呼吸波动减弱','总漏气升高','数据缺失','信号异常','流量波动近消失候选','流量波动减弱候选'];
  class AnnotationModel{
   constructor(meta,storage){this.meta=meta;this.storage=storage;this.key='respiratory-events-v1:'+meta.file_id;this.items=[]}
   validate(event){
@@ -28,7 +28,7 @@
  }
  root.AnnotationModel=AnnotationModel;root.annotationTypes=types;
  function compareReviewed(packet,meta){
-  if(packet?.kind!=='reviewed'||packet.version!==1||packet.file_id!==meta.file_id||packet.automatic?.file_id!==meta.file_id||packet.run_id!==packet.automatic.run_id||!Array.isArray(packet.events)||!Array.isArray(packet.automatic.events))throw Error('请选择与当前CSV匹配的人工校验JSON');
+  if(packet?.kind!=='reviewed'||![1,2].includes(packet.version)||packet.file_id!==meta.file_id||packet.automatic?.file_id!==meta.file_id||packet.run_id!==packet.automatic.run_id||!Array.isArray(packet.events)||!Array.isArray(packet.automatic.events))throw Error('请选择与当前CSV匹配的人工校验JSON');
   const model=new AnnotationModel(meta,{setItem(){}}),final=packet.events.map(e=>model.validate(e)),auto=packet.automatic.events.map(e=>model.validate(e));
   const current=new Map(final.map(e=>[e.id,e])),links=packet.automatic.event_links||{},linked=new Set(),rows=[];
   for(const original of auto){const id=links[original.id]||original.id;linked.add(id);const e=current.get(id);let result;

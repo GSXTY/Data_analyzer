@@ -1,10 +1,10 @@
-Windows x64 portable trial v0.2.0-beta.2.
+呼吸波形查看器 v0.3.0-beta.1 Windows x64 研发试用版。
 
-- Extract the ZIP and run RespiratoryViewer.exe. Python, Codex and MCP are not required for waveform viewing or annotation.
-- Local CSV loading, pressure overlay and manual event annotation.
-- Machine-total-flow screening with confirm/ignore/edit workflows.
-- Separate immutable automatic JSON and reviewed JSON with file fingerprint, version, parameters and edit history.
-- Review returned feedback without overwriting local annotations.
-- User data is stored outside the installation folder for upgrades.
+- 解压整个ZIP，双击 RespiratoryViewer.exe。无需安装Python、Codex或MCP。
+- 新增设备波形近消失、减弱候选方案；检测类型可多选或全选。类型和状态显示筛选同时作用于波形与事件列表。
+- 批次列表默认最近10次，历史窗口支持搜索、分页、重命名、归档恢复；相同条件重复扫描可复用已有批次。
+- 一键保存反馈文件夹，先预览并由使用者确认。CSV按内容只存一份，每批自动JSON复用，校验内容未变时不重复保存。
+- 新版人工JSON仅包含声明的时间范围和事件类型，区分逐条/完整检查；未检查区间不是正常标签，跨边界与估算时间标记单列。
+- 原有标记、扫描快照及旧版反馈读取保留；打包版数据保存在用户数据目录，升级时关闭旧版后再启动新版。
 
-Engineering screening only; thresholds are not clinically validated. Windows code signing and automatic updates are not included in this trial.
+这是未经临床验证的工程筛查，不能确定中枢性暂停、临床低通气或AHI。模型训练及PSG导入尚未实现。无自动更新，Windows试用包未签名。CSV和个人标记不会随代码或安装包上传GitHub。

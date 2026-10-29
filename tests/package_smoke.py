@@ -48,7 +48,24 @@ def main():
             assert reviewed['automatic']['events'][0]['status']=='candidate'
             assert reviewed['events'][0]['status']=='reviewed'
             assert reviewed['history'][-1]['after'][0]['note']=='synthetic review'
+            device=request('/api/detect',dict(file_id=fid,profile='device_candidates',reduction_ratio=.7,event_types=['流量波动近消失候选']))
+            assert device['settings']['event_types']==['流量波动近消失候选']
+            assert device['device_metrics']['by_type']['流量波动减弱候选']['count'] is None
+            packet=device['packet'];near=[e for e in packet['events'] if e['type']=='流量波动近消失候选'];assert near
+            for event in near:event['status']='reviewed'
+            request('/api/events',packet)
+            args=dict(file_id=fid,run_id=packet['run_id'],reviewer='package-test',reviewed_range=[70,110],reviewed_types=['流量波动近消失候选'],review_mode='complete')
+            preview=request('/api/feedback/prepare',args);assert preview['confirmed_count']>=1
+            saved=request('/api/feedback/export',dict(args,confirmed=True,expected_revision=preview['revision']))
+            assert (Path(saved['folder'])/'original.csv').read_bytes()=='\n'.join(rows).encode()
+            repeat=request('/api/feedback/export',dict(args,confirmed=True,expected_revision=preview['revision']));assert not repeat['created']
+            page=request('/api/scans?file_id='+fid);assert len(page['scans'])<=10
+            snapshot=request('/api/feedback',dict(file_id=fid,run_id=packet['run_id'],kind='automatic'))
+            request('/api/scans/edit',dict(file_id=fid,run_id=packet['run_id'],archived=True))
+            assert request('/api/feedback',dict(file_id=fid,run_id=packet['run_id'],kind='automatic'))==snapshot
+            request('/api/scans/edit',dict(file_id=fid,run_id=packet['run_id'],archived=False))
             print('PASS: standalone Windows EXE starts, serves UI, loads CSV, detects, preserves automatic JSON and exports reviewed JSON/history',flush=True)
+            print('PASS: standalone device selection, partial-review confirmation/export dedup and batch archive/snapshot retention',flush=True)
         finally:
             process.terminate();process.communicate(timeout=15)
 if __name__=='__main__':main()

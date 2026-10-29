@@ -6,9 +6,18 @@ from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timezone
 import uuid
+import hashlib
 from app_version import APP_VERSION
 
-TYPES = ('疑似暂停', '疑似低通气', '漏气', '波形异常', '伪迹/干扰', '其他', '呼吸波动减弱', '总漏气升高', '数据缺失', '信号异常')
+TYPES = ('疑似暂停', '疑似低通气', '漏气', '波形异常', '伪迹/干扰', '其他', '呼吸波动减弱', '总漏气升高', '数据缺失', '信号异常', '流量波动近消失候选', '流量波动减弱候选')
+
+
+def scan_fingerprint(start,end,settings):
+    profile=settings.get('profile','engineering')
+    defaults=['流量波动近消失候选','流量波动减弱候选','总漏气升高','数据缺失','信号异常'] if profile=='device_candidates' else ['呼吸波动减弱','总漏气升高','数据缺失','信号异常']
+    key=[float(start),float(end),settings.get('version'),profile,float(settings.get('min_duration',10)),
+         float(settings.get('reduction_ratio',.3)),sorted(set(settings.get('event_types',defaults)))]
+    return hashlib.sha256(json.dumps(key,ensure_ascii=False).encode()).hexdigest()
 
 
 class Conflict(ValueError):
@@ -49,6 +58,25 @@ class EventStore:
             db.execute('CREATE TABLE IF NOT EXISTS records (file_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, events TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS scans (run_id TEXT PRIMARY KEY, file_id TEXT NOT NULL, payload TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS changes (file_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(file_id,revision))')
+            db.execute('CREATE TABLE IF NOT EXISTS scan_info (run_id TEXT PRIMARY KEY, file_id TEXT NOT NULL, created_at TEXT NOT NULL, title TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, fingerprint TEXT NOT NULL, summary TEXT NOT NULL)')
+            db.execute('CREATE INDEX IF NOT EXISTS scan_info_file_date ON scan_info(file_id,archived,created_at DESC)')
+            db.execute('CREATE INDEX IF NOT EXISTS scan_info_match ON scan_info(file_id,fingerprint)')
+            # Build a small index once for old snapshots; original payloads stay immutable.
+            for (payload,) in db.execute('SELECT s.payload FROM scans s LEFT JOIN scan_info i ON i.run_id=s.run_id WHERE i.run_id IS NULL').fetchall():
+                self._index_scan(db,json.loads(payload))
+
+    @staticmethod
+    def _index_scan(db,snapshot):
+        summary={k:snapshot[k] for k in ('run_id','created_at','app_version','settings','scan_start','scan_end')}
+        summary['detected_count']=len(snapshot.get('events',[]))
+        label='设备候选' if snapshot['settings'].get('profile')=='device_candidates' else '工程筛查'
+        title=f"{label} {snapshot['scan_start']:g}—{snapshot['scan_end']:g}秒"
+        db.execute('INSERT INTO scan_info VALUES (?,?,?,?,?,?,?)',(snapshot['run_id'],snapshot['file_id'],snapshot['created_at'],title,0,
+                   scan_fingerprint(snapshot['scan_start'],snapshot['scan_end'],snapshot['settings']),json.dumps(summary,ensure_ascii=False)))
+
+    @staticmethod
+    def _scan_info(row):
+        return dict(json.loads(row[0]),title=row[1],archived=bool(row[2]))
 
     def read(self, file_id):
         with closing(sqlite3.connect(self.path)) as db, db:
@@ -79,12 +107,43 @@ class EventStore:
                 snapshot=dict(version=1,kind='automatic',file_id=meta['file_id'],run_id=run_id,app_version=APP_VERSION,
                               created_at=change['at'],recording={k:meta[k] for k in ('name','start','end','rows')},**scan)
                 db.execute('INSERT INTO scans VALUES (?,?,?)',(run_id,meta['file_id'],json.dumps(snapshot,ensure_ascii=False,allow_nan=False)))
+                self._index_scan(db,snapshot)
         return dict(file_id=meta['file_id'], revision=current + 1, events=checked,run_id=run_id)
 
     def scans(self, file_id):
         with closing(sqlite3.connect(self.path)) as db:
-            rows=db.execute('SELECT payload FROM scans WHERE file_id=? ORDER BY rowid DESC',(file_id,)).fetchall()
-        return [{k:p[k] for k in ('run_id','created_at','app_version','settings','scan_start','scan_end')} for (raw,) in rows for p in [json.loads(raw)]]
+            rows=db.execute('SELECT summary,title,archived FROM scan_info WHERE file_id=? ORDER BY created_at DESC,rowid DESC',(file_id,)).fetchall()
+        return [self._scan_info(row) for row in rows]
+
+    def scan_page(self,file_id,limit=10,offset=0,query='',state='active',selected=None):
+        if isinstance(limit,bool) or not isinstance(limit,int) or not 1<=limit<=100 or isinstance(offset,bool) or not isinstance(offset,int) or offset<0:
+            raise ValueError('批次分页参数无效')
+        if state not in ('active','archived','all') or not isinstance(query,str) or len(query)>200:raise ValueError('批次筛选条件无效')
+        where='file_id=?';args=[file_id]
+        if state!='all':where+=' AND archived=?';args.append(int(state=='archived'))
+        if query.strip():
+            pattern='%'+query.strip().replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+            where+=" AND (title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\')";args.extend([pattern,pattern])
+        with closing(sqlite3.connect(self.path)) as db:
+            total=db.execute('SELECT COUNT(*) FROM scan_info WHERE '+where,args).fetchone()[0]
+            rows=db.execute('SELECT summary,title,archived FROM scan_info WHERE '+where+' ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?',args+[limit,offset]).fetchall()
+            chosen=db.execute('SELECT summary,title,archived FROM scan_info WHERE file_id=? AND run_id=?',(file_id,selected)).fetchone() if selected else None
+        return dict(scans=[self._scan_info(r) for r in rows],total=total,limit=limit,offset=offset,selected=self._scan_info(chosen) if chosen else None)
+
+    def edit_scan(self,file_id,run_id,title=None,archived=None):
+        if title is None and archived is None:raise ValueError('未指定批次修改')
+        if title is not None and (not isinstance(title,str) or not title.strip() or len(title)>100):raise ValueError('批次名称需为1～100字')
+        if archived is not None and not isinstance(archived,bool):raise ValueError('归档状态无效')
+        with closing(sqlite3.connect(self.path)) as db,db:
+            row=db.execute('SELECT summary,title,archived FROM scan_info WHERE file_id=? AND run_id=?',(file_id,run_id)).fetchone()
+            if not row:raise ValueError('未找到当前文件对应的批次')
+            db.execute('UPDATE scan_info SET title=?,archived=? WHERE file_id=? AND run_id=?',(title.strip() if title is not None else row[1],int(archived) if archived is not None else row[2],file_id,run_id))
+            return self._scan_info((row[0],title.strip() if title is not None else row[1],int(archived) if archived is not None else row[2]))
+
+    def matching_scan(self,file_id,start,end,settings):
+        with closing(sqlite3.connect(self.path)) as db:
+            row=db.execute('SELECT summary,title,archived FROM scan_info WHERE file_id=? AND fingerprint=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(file_id,scan_fingerprint(start,end,settings))).fetchone()
+        return self._scan_info(row) if row else None
 
     def feedback(self, meta, run_id, kind, reviewer='', reviewed_range=None):
         if kind not in ('automatic','reviewed'):raise ValueError('反馈类型无效')

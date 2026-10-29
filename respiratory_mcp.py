@@ -108,10 +108,10 @@ def summarize_events(file_id: str) -> dict:
 
 
 @mcp.tool(annotations=WRITE)
-def detect_events(file_id: str, start: float = 0, end: float | None = None, min_duration: float = 10, reduction_ratio: float = .3) -> dict:
-    """Scan full-resolution machine TOTAL flow and TOTAL leak, save engineering-screening candidates. Source-second times; not clinical apnea/AHI. Types include 呼吸波动减弱,总漏气升高,数据缺失,信号异常. Existing reviewed/ignored detections are retained. end=None scans to file end."""
+def detect_events(file_id: str, start: float = 0, end: float | None = None, min_duration: float = 10, reduction_ratio: float = .3, profile: str = 'engineering', event_types: list[str] | None = None) -> dict:
+    """Scan full-resolution machine TOTAL flow and TOTAL leak. profile=engineering preserves v1; profile=device_candidates with reduction_ratio=0.7 separates near-absent (<=0.1) and reduced machine-waveform candidates and returns union-duration metrics. Clinical apnea/hypopnea, central classification and AHI remain unavailable. Source-second times, not display resampling. Existing reviewed/ignored detections are retained. end=None scans to file end."""
     check(file_id)
-    return request('/api/detect',dict(file_id=file_id,start=start,end=end,min_duration=min_duration,reduction_ratio=reduction_ratio))
+    return request('/api/detect',dict(file_id=file_id,start=start,end=end,min_duration=min_duration,reduction_ratio=reduction_ratio,profile=profile,event_types=event_types))
 
 
 if __name__=='__main__':

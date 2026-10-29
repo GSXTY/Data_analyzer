@@ -25,3 +25,5 @@ assert.equal(compareReviewed(feedback,meta)[0].result,'边界调整');
 assert.throws(()=>compareReviewed({...feedback,file_id:'other'},meta));
 feedback.events=[{...base,status:'ignored'}];assert.match(compareReviewed(feedback,meta)[0].result,/已忽略/);
 console.log('PASS: feedback comparison, immutable original range and cross-file rejection');
+assert.doesNotThrow(()=>compareReviewed({...feedback,version:2,reviewed_types:['疑似暂停'],review_mode:'spot'},meta));
+console.log('PASS: compact scoped v2 feedback remains readable alongside legacy v1');
