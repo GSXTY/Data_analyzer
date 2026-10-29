@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "respiratory-local": {
+      "command": "python",
+      "args": ["C:/path/to/Data_analyzer/respiratory_mcp.py"]
+    }
+  }
+}

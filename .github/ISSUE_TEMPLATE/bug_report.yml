@@ -1,0 +1,21 @@
+name: 研发试用反馈
+description: 报告软件问题或算法误报/漏检；原始数据与标注请走公司内部渠道。
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本和算法版本
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: 问题类型
+      options: [误报, 漏检, 事件边界, 分类错误, 卡顿或报错, 其他]
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 操作步骤、预期结果和实际结果
+      description: 不要在Issue中上传原始CSV或包含敏感信息的JSON；填写内部反馈包编号即可。
+    validations:
+      required: true
