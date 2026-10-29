@@ -24,8 +24,14 @@ jobs:
           assert os.environ['GITHUB_REF_NAME'] == 'v' + APP_VERSION
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
+      - name: Run browser logic tests
+        run: |
+          node tests/test_annotations.cjs
+          node tests/test_interaction.cjs
       - name: Build portable Windows package
         run: python build_windows.py
+      - name: Verify standalone package
+        run: python tests/package_smoke.py dist/RespiratoryViewer/RespiratoryViewer.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-trial
