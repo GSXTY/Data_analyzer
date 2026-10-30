@@ -107,7 +107,7 @@ def detect(recording, start=0, end=None, min_duration=10, reduction_ratio=.3, pr
     if '漏气量' in med:
         for a,b in runs(leak_bad.fillna(False)):
             if min(index[b-1]+1,end)-max(index[a],start)<min_duration:continue
-            add(index[a],index[b-1]+1,'总漏气升高',['漏气量'],f'总漏气相对前120秒基线升高，中位变化={float((med["漏气量"]-leak_baseline).iloc[a:b].median()):.2f}原始单位；阈值=max(10,基线绝对值×0.5,4×MAD)，不是非故意漏气量')
+            add(index[a],index[b-1]+1,'总漏气升高',['漏气量'],f'瞬时总漏气率相对前120秒基线升高，中位变化={float((med["漏气量"]-leak_baseline).iloc[a:b].median()):.2f} L/min；阈值=max(10 L/min,基线绝对值×0.5,4×MAD)，不是非故意漏气量')
     # Explicit source-time gaps: include the gap start at the preceding second end.
     for a,b in recording.gaps:
         if b>start and a<end:add(a,b,'数据缺失',['流量'],f'相邻原始时间戳间隔{b-a:.1f}秒，不用于呼吸波动事件计时')
@@ -117,7 +117,7 @@ def detect(recording, start=0, end=None, min_duration=10, reduction_ratio=.3, pr
     # Boundary-clipped candidates are omitted from low-flow detection, not inflated.
     result=sorted(events,key=lambda e:(e['start'],e['type']))
     warnings=['机器总流量不能直接代表患者流量；此算法是可解释的工程筛查，阈值尚未由人工标注集验证。',
-              '未确认采样率/单位；秒级分组直接使用全部原始样本，不使用绘图降采样点。',
+              '压力单位Pa；计算的机器总流量与瞬时总漏气率均为L/min，有效更新率待核实。按原始秒分组，不强制50Hz，不使用绘图降采样点。',
               '前30秒或中断/状态变化后基线不足的区间不产生流量减弱候选；总漏气不与机器流量相减。']
     eligible=int((quality&~pressure_bad&~leak_bad&~state_bad&pd.Series(index>=start,index=index)&pd.Series(index<end,index=index)).sum())
     if eligible<.5*(end-start):warnings.append('本次可筛查的有效秒数不足所选范围50%，未覆盖区间不可据此排除异常。')
@@ -126,6 +126,10 @@ def detect(recording, start=0, end=None, min_duration=10, reduction_ratio=.3, pr
                 scan_start=start,scan_end=end,analyzed_rows=int(hi-lo),
                 eligible_seconds=eligible,warnings=warnings)
     settings['event_types']=list(requested)
+    settings['pressure_unit']='Pa'
+    settings['flow_unit']='L/min'
+    settings['leak_unit']='L/min'
+    settings['leak_semantics']='instantaneous_total_rate'
     if profile=='device_candidates':output['device_metrics']=device_metrics(result,eligible,requested)
     return output
 

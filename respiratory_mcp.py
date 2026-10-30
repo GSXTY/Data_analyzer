@@ -63,6 +63,8 @@ def get_waveform(file_id: str, start: float, end: float, channels: list[str], mo
     q = urlencode({'file_id':file_id,'start': start, 'end': end, 'channel': channels, 'mode': mode, 'pixels': max(100, min(1200,pixels))}, doseq=True)
     result = request('/api/wave?' + q)
     result.update(file_id=file_id, time_basis=mode, sampled_for_display=True, viewer_url=BASE)
+    result.update(channel_units={c:meta.get('channel_units',{}).get(c) for c in channels},
+                  channel_roles={c:meta.get('channel_roles',{}).get(c) for c in channels},sampling_info=meta.get('sampling_info'))
     return result
 
 

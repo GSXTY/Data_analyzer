@@ -18,10 +18,14 @@ from event_store import EventStore, Conflict
 from detector import detect, DETECTABLE_TYPES, VERSION
 from app_version import APP_VERSION, APP_ID
 from feedback_export import scoped_review,save_package,folder_for
+from recording_cache import RecordingCache
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, '_MEIPASS', ROOT))
 DEFAULT = os.environ.get('RESPIRATORY_CSV','')
+PRESSURE_ROLES = {'气压1':'内部压力','气压2':'出风口压力','气压3':'标准气压',
+                  '控制压力':'控制压力','压力':'压力','治疗压':'治疗压力','吸气压':'吸气压力','呼气压':'呼气压力',
+                  '气压1−气压3（补偿）':'内部相对标准气压','气压2−气压3（补偿）':'出风口相对标准气压','气压1−气压2（差压）':'内部与出风口差压'}
 
 
 class Recording:
@@ -84,6 +88,7 @@ class Recording:
             if compensated in self.channels:
                 self.engineering[raw_name] = self.channels[compensated]
         byte_column = str(df.columns[13]) if len(df.columns) > 13 else None
+        if byte_column in PRESSURE_ROLES:byte_column=None
         if byte_column in self.channels:
             values = self.channels[byte_column]
             self.engineering[byte_column] = np.where(values > 125, values - 256, values)
@@ -91,12 +96,21 @@ class Recording:
         self.gaps = [[float(seconds[i]), float(seconds[i + 1])] for i in gaps]
         reference_breaks = np.flatnonzero(np.diff(seconds) > threshold)
         reference_gaps = [[float(self.display_x[i]), float(self.display_x[i+1])] for i in reference_breaks]
-        counts = times.value_counts()
+        bins,counts=np.unique(np.floor(seconds).astype(np.int64),return_counts=True)
+        interior=counts[(bins>bins[0])&(bins<bins[-1])]
+        if not len(interior):interior=counts
         self.meta = dict(name=name, rows=len(df), start=str(times.iloc[0]), end=str(times.iloc[-1]),
                          file_id=hashlib.sha256(raw).hexdigest(),app_version=APP_VERSION,
                          duration=float(seconds[-1]), channels=list(self.channels), gaps=self.gaps,
-                         median_records_per_second=float(counts.median()),
+                         median_records_per_second=float(np.median(interior)),
                          repeated_timestamps=bool(times.duplicated().any()), encoding=encoding)
+        self.meta.update(channel_units={name:('Pa' if name in PRESSURE_ROLES else 'L/min') for name in self.channels if name in PRESSURE_ROLES or name in ('流量','漏气量')},
+                         channel_roles={name:(PRESSURE_ROLES[name] if name in PRESSURE_ROLES else '机器总流量（计算值）' if name=='流量' else '瞬时总漏气率（计算值）') for name in self.channels if name in PRESSURE_ROLES or name in ('流量','漏气量')},
+                         device_profile='当前设备使用者确认配置；其他设备导入需另行核对',
+                         sampling_info=dict(record_count_p10=float(np.quantile(interior,.1)),record_count_p90=float(np.quantile(interior,.9)),
+                            recorded_seconds=len(bins),pressure_nominal_hz=50,pressure_reported_hz=[47,48],
+                            computed_flow_leak_reported_hz=30,computed_rate_verified=False,uniform_sampling_verified=False,
+                            note='每秒行数是记录密度，不等于独立采样或更新频率；重复值不能据此推断为未更新。机器总流量与瞬时总漏气率单位均为L/min，不相减；不按50Hz重采样或插值。'))
         self.meta.update(display_duration=float(self.display_x[-1]), engineering_gaps=reference_gaps,
                          engineering_gap_threshold=threshold, engineering_byte_column=byte_column,
                          engineering_pressure_compensated='气压1' in self.engineering,
@@ -150,6 +164,7 @@ recording = None
 recording_lock = threading.Lock()
 event_store = None
 scan_lock = threading.Lock()
+recording_cache = RecordingCache()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -183,6 +198,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'error': '请先打开 CSV 文件。'}, 400)
             if url.path == '/api/meta':
                 return self.send(current.meta)
+            if url.path == '/api/current-csv':
+                if parse_qs(url.query).get('file_id',[''])[0]!=current.meta['file_id']:
+                    return self.send({'error':'当前文件已变更，请重新读取'},409)
+                return self.send(current.raw_csv,content_type='application/octet-stream')
             if url.path == '/api/device-summary':
                 if parse_qs(url.query).get('file_id',[''])[0]!=current.meta['file_id']:
                     return self.send({'error':'文件已切换'},409)
@@ -220,6 +239,28 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin != 'http://' + self.headers.get('Host', ''):
             return self.send({'error': '不允许跨站请求'}, 403)
         try:
+            if urlparse(self.path).path in ('/api/activate','/api/cache/release'):
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<1000:raise ValueError('缓存请求大小无效')
+                args=json.loads(self.rfile.read(length));fid=args.get('file_id')
+                if not isinstance(fid,str) or len(fid)!=64:raise ValueError('文件指纹无效')
+                with recording_lock:
+                    if urlparse(self.path).path.endswith('/release'):
+                        return self.send(dict(released=recording_cache.release(fid) if recording is None or recording.meta['file_id']!=fid else False))
+                    recording_cache.put(recording)
+                    cached=recording_cache.get(fid)
+                    if cached is None:return self.send(dict(hit=False))
+                    recording=cached
+                    return self.send(dict(hit=True,meta=cached.meta))
+            if urlparse(self.path).path=='/api/close':
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<1000:raise ValueError('关闭请求大小无效')
+                args=json.loads(self.rfile.read(length))
+                with recording_lock:
+                    if recording is None or args.get('file_id')!=recording.meta['file_id']:raise Conflict('当前文件已变化，关闭已取消')
+                    recording_cache.release(recording.meta['file_id'])
+                    recording=None
+                return self.send(dict(closed=True))
             if urlparse(self.path).path=='/api/feedback/open-folder':
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<1000:raise ValueError('请求大小无效')
@@ -328,8 +369,13 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > 1024**3:
                 raise ValueError('请选择大小在 1 GB 以内的 CSV 文件。')
             from urllib.parse import unquote
-            new = Recording(self.rfile.read(length), unquote(self.headers.get('X-Filename', 'recording.csv')))
+            raw=self.rfile.read(length);fid=hashlib.sha256(raw).hexdigest()
             with recording_lock:
+                recording_cache.put(recording)
+                new=recording_cache.get(fid)
+            if new is None:new=Recording(raw, unquote(self.headers.get('X-Filename', 'recording.csv')))
+            with recording_lock:
+                recording_cache.put(new)
                 recording = new
             self.send(new.meta)
         except Conflict as exc:

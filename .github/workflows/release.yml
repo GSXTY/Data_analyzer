@@ -29,6 +29,7 @@ jobs:
           node tests/test_annotations.cjs
           node tests/test_interaction.cjs
           node tests/test_event_filters.cjs
+          node tests/test_multifile.cjs
       - name: Build portable Windows package
         run: python build_windows.py
       - name: Verify standalone package

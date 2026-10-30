@@ -4,6 +4,26 @@ from viewer import Recording
 
 
 class RecordingTests(unittest.TestCase):
+    def test_pressure_profile_and_actual_record_density(self):
+        rows=['time,气压1,气压2,气压3,流量,漏气量']
+        for i in range(12):rows.append(f'2026-01-01 00:00:0{i//4}.{(i%4)*250:03},101500,101400,101000,12,10')
+        r=Recording('\n'.join(rows).encode(),'profile.csv')
+        self.assertEqual(r.meta['channel_units']['气压1'],'Pa')
+        self.assertEqual(r.meta['channel_roles']['气压2'],'出风口压力')
+        self.assertEqual(r.meta['channel_units']['流量'],'L/min')
+        self.assertEqual(r.meta['channel_units']['漏气量'],'L/min')
+        self.assertEqual(r.meta['channel_roles']['漏气量'],'瞬时总漏气率（计算值）')
+        self.assertEqual(r.meta['median_records_per_second'],4)
+        self.assertFalse(r.meta['sampling_info']['uniform_sampling_verified'])
+        self.assertFalse(r.meta['sampling_info']['computed_rate_verified'])
+        self.assertTrue((r.engineering['气压1']==500).all())
+        self.assertTrue((r.engineering['气压2']==400).all())
+        self.assertTrue((r.channels['气压1']==101500).all())
+
+    def test_pressure_column_never_gets_legacy_byte_conversion(self):
+        cols=['time']+['c'+str(i) for i in range(1,13)]+['气压1']
+        r=Recording((','.join(cols)+'\n'+','.join(['2026-01-01']+['0']*12+['101500'])).encode(),'pressure.csv')
+        self.assertEqual(r.wave(0,0,['气压1'],100,'engineering')['series']['气压1'][0][1],101500)
     def test_encoding_time_gaps_and_missing(self):
         raw = ('时间,流量,压力\n2026-10-16 01:00:00,1,2\n'
                '2026-10-16 01:00:00,4,3\n2026-10-16 01:00:03,,4\n').encode('gb18030')

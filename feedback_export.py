@@ -36,6 +36,7 @@ def scoped_review(meta,automatic,current,reviewer,reviewed_range,reviewed_types,
                  settings=automatic['settings'],excerpt=True,reviewed_range=[a,b])
     return dict(version=2,kind='reviewed',file_id=meta['file_id'],run_id=automatic['run_id'],app_version=APP_VERSION,
                 recording=automatic['recording'],reviewer=reviewer.strip(),reviewed_range=[a,b],reviewed_types=types,review_mode=review_mode,
+                signal_metadata={k:meta[k] for k in ('channel_units','channel_roles','sampling_info','device_profile') if k in meta},
                 events=sorted(events,key=lambda e:(e['start'],e['id'])),boundary_events=sorted(boundary,key=lambda e:(e['start'],e['id'])),
                 automatic=excerpt,unresolved_original_ids=sorted(unresolved),estimated_time_event_ids=sorted(e['id'] for e in wrong_axis),estimated_time_events=wrong_axis,
                 training_scope=dict(time_mode='raw',interval='[start,end)',positive_event_ids=sorted(e['id'] for e in events if e['status']=='reviewed'),

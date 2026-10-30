@@ -64,8 +64,21 @@ def main():
             request('/api/scans/edit',dict(file_id=fid,run_id=packet['run_id'],archived=True))
             assert request('/api/feedback',dict(file_id=fid,run_id=packet['run_id'],kind='automatic'))==snapshot
             request('/api/scans/edit',dict(file_id=fid,run_id=packet['run_id'],archived=False))
+            assert meta['channel_units']['压力']=='Pa'
+            assert meta['channel_units']['流量']=='L/min' and meta['channel_units']['漏气量']=='L/min'
+            assert not meta['sampling_info']['uniform_sampling_verified']
+            raw_a='\n'.join(rows).encode();raw_b=raw_a.replace(b'400,3',b'401,3',1)
+            other=request('/api/open',raw=raw_b);assert other['file_id']!=fid
+            activated=request('/api/activate',dict(file_id=fid));assert activated['hit'] and activated['meta']['file_id']==fid
+            assert request('/api/cache/release',dict(file_id=other['file_id']))['released']
+            assert not request('/api/activate',dict(file_id=other['file_id']))['hit']
+            prior=request('/api/events?file_id='+fid)
+            assert request('/api/close',dict(file_id=fid))['closed']
+            request('/api/open',raw=raw_a)
+            assert request('/api/events?file_id='+fid)==prior
             print('PASS: standalone Windows EXE starts, serves UI, loads CSV, detects, preserves automatic JSON and exports reviewed JSON/history',flush=True)
             print('PASS: standalone device selection, partial-review confirmation/export dedup and batch archive/snapshot retention',flush=True)
+            print('PASS: standalone cached CSV activation, release/close/reopen, annotation retention and Pa/L/min metadata',flush=True)
         finally:
             process.terminate();process.communicate(timeout=15)
 if __name__=='__main__':main()

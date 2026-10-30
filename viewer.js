@@ -5,6 +5,7 @@ let cache=null, overviewImage=null, baseSecond=0, generation=0;
 let groups=[], movingChannel=null;
 let displayMode='engineering';
 let annotations=null,marking=false,markSelection=null,eventDraft=null;
+let fileLibrary=[],activeLibraryId=null,librarySerial=0,fileSwitching=false;
 let serverRevision=0,eventSyncReady=false,eventSaving=false;
 const eventColors={'疑似暂停':'#ce5362','疑似低通气':'#9b69be','漏气':'#dc9a28','波形异常':'#328ca5','伪迹/干扰':'#728398','其他':'#619c59'};
 Object.assign(eventColors,{'呼吸波动减弱':'#ce5362','总漏气升高':'#dc9a28','数据缺失':'#728398','信号异常':'#9b69be'});
@@ -12,6 +13,7 @@ Object.assign(eventColors,{'流量波动近消失候选':'#be394c','流量波动
 const detectionTypes={engineering:['呼吸波动减弱','总漏气升高','数据缺失','信号异常'],device_candidates:['流量波动近消失候选','流量波动减弱候选','总漏气升高','数据缺失','信号异常']};
 let chosenDetectionTypes=new Set(detectionTypes.device_candidates),visibleEventTypes=new Set(Object.keys(eventColors));
 const $=id=>document.getElementById(id);
+function channelLabel(name){const unit=meta?.channel_units?.[name],role=meta?.channel_roles?.[name];return name+(role&&role!==name?' · '+role:'')+(unit?' ['+unit+']':'')}
 const colors=['#087e8b','#4263c7','#b47924','#9871b5','#d04b59','#538c36','#b65191','#397eaa'];
 function channelColor(name){const reference={'气压1':'#4472c4','气压2':'#ed7d31','气压1−气压2（差压）':'#a5a5a5','控制压力':'#edaf00'};return reference[name]||colors[Math.max(0,meta.channels.indexOf(name))%colors.length]}
 function selectionKey(){return selected.join('|')+(displayMode==='raw'?'':'|engineering')}
@@ -79,7 +81,7 @@ function makePlots(){
   const legend=document.createElement('div');legend.className='legend';
   group.forEach(name=>{
    const chip=document.createElement('div');chip.className='channel-chip';
-   const handle=document.createElement('span');handle.className='channel-handle';handle.draggable=true;handle.textContent='⠿ '+name+(displayMode==='engineering'&&meta.engineering_pressure_compensated&&['气压1','气压2'].includes(name)?'（已减气压3）':'');handle.style.color=channelColor(name);handle.title='拖到另一张图上叠加';
+   const handle=document.createElement('span');handle.className='channel-handle';handle.draggable=true;handle.textContent='⠿ '+channelLabel(name)+(displayMode==='engineering'&&meta.engineering_pressure_compensated&&['气压1','气压2'].includes(name)?'（已减气压3）':'');handle.style.color=channelColor(name);handle.title='拖到另一张图上叠加';
    handle.ondragstart=e=>{movingChannel=name;e.dataTransfer.setData('text/plain',name);e.dataTransfer.effectAllowed='move';document.body.classList.add('channel-dragging')};
    handle.ondragend=()=>{movingChannel=null;document.body.classList.remove('channel-dragging');document.querySelectorAll('.drop-target').forEach(el=>el.classList.remove('drop-target'))};
    chip.append(handle);
@@ -91,7 +93,7 @@ function makePlots(){
    legend.append(chip);
   });
   const axis=document.createElement('span');axis.className='axis-note';axis.textContent=(group.length>1?'叠加 · 共用数值轴':'拖动通道名称可叠加')+(displayMode==='engineering'?' · 旧脚本处理值':' · 原始值');
-  title.append(legend,axis);const value=document.createElement('div');value.className='value group-value';
+  const units=[...new Set(group.map(n=>meta.channel_units?.[n]||'未确认'))];axis.textContent+=' · '+(units.length===1&&units[0]==='Pa'?'纵轴 Pa':'单位 '+units.join(' / '));title.append(legend,axis);const value=document.createElement('div');value.className='value group-value';
   const wrap=document.createElement('div');wrap.className='wave-wrap';const canvas=document.createElement('canvas'),overlay=document.createElement('canvas');overlay.className='cursor-layer';wrap.append(canvas,overlay);section.append(title,value,wrap);host.append(section);events(overlay);
   section.ondragover=e=>{if(movingChannel&&!group.includes(movingChannel)){e.preventDefault();e.dataTransfer.dropEffect='move';section.classList.add('drop-target')}};
   section.ondragleave=e=>{if(!section.contains(e.relatedTarget))section.classList.remove('drop-target')};
@@ -99,7 +101,7 @@ function makePlots(){
  });
 }
 function render(){if(!meta)return;makePlots();[...$('plots').children].forEach((section,i)=>{const layers=groups[i].map(name=>({points:data[name]||[],color:channelColor(name)}));paint(section.querySelector('canvas'),[],view,'',false,layers)});drawCursors()}
-function drawCursors(){[...$('plots').children].forEach((section,i)=>{const c=section.querySelector('.cursor-layer'),[ctx,w,h]=fit(c),el=section.querySelector('.value');drawEventBands(ctx,w,h,view,groups[i]);if(hover===null||drag){el.textContent='';return}ctx.strokeStyle='#8095a8';ctx.setLineDash([3,3]);const x=68+(hover-view[0])/(view[1]-view[0])*(w-84);ctx.beginPath();ctx.moveTo(x,12);ctx.lineTo(x,h-28);ctx.stroke();el.replaceChildren();for(const name of groups[i]){const pts=data[name]||[];let index=lowerBound(pts,hover);if(index>=pts.length)index=pts.length-1;if(index>0&&Math.abs(pts[index-1][0]-hover)<Math.abs(pts[index][0]-hover))index--;const p=pts[index];if(p&&p[0]>=view[0]&&p[0]<=view[1]){const span=document.createElement('span');span.style.color=channelColor(name);span.textContent=name+' '+(p[1]??'缺失')+' · '+clock(p[0])+' · #'+(p[2]+1).toLocaleString();el.append(span)}}})}
+function drawCursors(){[...$('plots').children].forEach((section,i)=>{const c=section.querySelector('.cursor-layer'),[ctx,w,h]=fit(c),el=section.querySelector('.value');drawEventBands(ctx,w,h,view,groups[i]);if(hover===null||drag){el.textContent='';return}ctx.strokeStyle='#8095a8';ctx.setLineDash([3,3]);const x=68+(hover-view[0])/(view[1]-view[0])*(w-84);ctx.beginPath();ctx.moveTo(x,12);ctx.lineTo(x,h-28);ctx.stroke();el.replaceChildren();for(const name of groups[i]){const pts=data[name]||[];let index=lowerBound(pts,hover);if(index>=pts.length)index=pts.length-1;if(index>0&&Math.abs(pts[index-1][0]-hover)<Math.abs(pts[index][0]-hover))index--;const p=pts[index];if(p&&p[0]>=view[0]&&p[0]<=view[1]){const span=document.createElement('span');span.style.color=channelColor(name);span.textContent=channelLabel(name)+' '+(p[1]??'缺失')+' · '+clock(p[0])+' · #'+(p[2]+1).toLocaleString();el.append(span)}}})}
 let cursorRAF=0;
 function scheduleCursor(){if(!cursorRAF)cursorRAF=requestAnimationFrame(()=>{cursorRAF=0;drawCursors()})}
 function pointer(c,e,range=view){const r=c.getBoundingClientRect(),fraction=Math.max(0,Math.min(1,(e.clientX-r.left-68)/(r.width-84)));return range[0]+fraction*(range[1]-range[0])}
@@ -119,14 +121,16 @@ function showModeInfo(){
  meta.gaps=displayMode==='engineering'?meta.engineering_gaps:meta.raw_gaps;
  document.body.dataset.mode=displayMode;
  $('display-mode').value=displayMode;
- $('mode-note').textContent=displayMode==='engineering'?'旧脚本显示模式：'+(meta.engineering_pressure_compensated?'气压1、气压2均已减去气压3；':'当前文件无可用的气压1/2/3补偿组合；')+'重复时间戳按旧脚本算法估算展开，仅用于显示，不代表已确认的采样时间。断线阈值 '+meta.engineering_gap_threshold+' 秒（沿用旧脚本）；第14列 '+(meta.engineering_byte_column||'不存在')+' 沿用大于125减256规则。':'原始模式：保留原始压力和秒级时间戳，同一秒内可能呈竖线。相邻时间差超过1秒显示灰色间隔，不转换数值单位。';
+ $('mode-note').textContent=displayMode==='engineering'?'旧脚本显示模式：'+(meta.engineering_pressure_compensated?'气压1、气压2均已减去气压3；':'当前文件无可用的气压1/2/3补偿组合；')+'重复时间戳按旧脚本算法估算展开，仅用于显示，不代表已确认的采样时间。断线阈值 '+meta.engineering_gap_threshold+' 秒（沿用旧脚本）；第14列 '+(meta.engineering_byte_column||'未应用字节转换')+' 沿用大于125减256规则。':'原始模式：保留原始压力和秒级时间戳，同一秒内可能呈竖线。相邻时间差超过1秒显示灰色间隔，不转换数值单位。';
+ if(meta.channel_units&&Object.keys(meta.channel_units).length)$('mode-note').textContent+=' 压力单位Pa：气压1为内部、气压2为出风口、气压3为标准气压；仅气压1/2按现有规则扣除气压3；机器总流量、瞬时总漏气率均为L/min，不相减。';
+ if(meta.sampling_info)$('mode-note').textContent+=' CSV每个有记录整秒的行数中位值 '+meta.median_records_per_second+'（P10–P90：'+meta.sampling_info.record_count_p10+'–'+meta.sampling_info.record_count_p90+'），不代表独立采样率。设备反馈压力约47–48Hz、预期50Hz；计算流量/漏气约30Hz待核实，不据此强制重采样。';
  $('info').replaceChildren();[meta.name,meta.rows.toLocaleString()+' 行',meta.start+' — '+meta.end,'当前模式断线 '+meta.gaps.length+' 处'].forEach(s=>{const span=document.createElement('span');span.textContent=s;$('info').append(span)});
 }
 async function loadOverview(){const gen=generation,channel=selected[0]||meta.channels[0],q=new URLSearchParams({start:0,end:Math.max(meta.duration,1),pixels:1000,channel,mode:displayMode});try{const d=await api('/api/wave?'+q);if(gen!==generation)return;overview=d.series[channel]||[];overviewImage=null;drawOverview()}catch(e){if(gen===generation)error(e)}}
 function changeMode(mode){if(!meta)return;markSelection=null;displayMode=mode;generation++;serial++;controller?.abort();cache=null;data={};overview=[];overviewImage=null;hover=null;drag=null;$('plots').dataset.layout='';showModeInfo();setView(...view,0);loadOverview();renderEventList()}
 async function init(m){
  for(const name of annotationTypes){if(![...$('event-type').options].some(o=>o.value===name)){const o=document.createElement('option');o.textContent=name;$('event-type').append(o)}}
- generation++;const gen=generation;serial++;controller?.abort();clearTimeout(timer);meta=m;cache=null;data={};overviewImage=null;hover=null;drag=null;groups=[];
+ generation++;const gen=generation;serial++;controller?.abort();clearTimeout(timer);meta=m;displayMode='engineering';cache=null;data={};overviewImage=null;hover=null;drag=null;groups=[];
  const parts=m.start.slice(11,19).split(':').map(Number);baseSecond=parts[0]*3600+parts[1]*60+parts[2];
  $('error').textContent='';if(duplicateScanResolve)finishDuplicateScan('cancel');if($('scan-history-dialog').open)$('scan-history-dialog').close();historySerial++;$('feedback-run').replaceChildren();annotations=null;eventDraft=null;markSelection=null;if($('event-dialog').open)$('event-dialog').close();try{if(!m.file_id)throw Error('请重启查看器后再使用事件保存');annotations=new AnnotationModel(m,localStorage);annotations.load()}catch(e){annotations=null;error(e)}renderEventList();
  $('info').replaceChildren();[m.name,m.rows.toLocaleString()+' 行',m.start+' — '+m.end,'时间间隔异常 '+m.gaps.length+' 处'].forEach(s=>{const span=document.createElement('span');span.textContent=s;$('info').append(span)});
@@ -134,10 +138,45 @@ async function init(m){
  if(!selected.length)selected=['流量','压力','漏气量'].filter(n=>m.channels.includes(n));
  if(!selected.length)selected=m.channels.slice(0,3);
  groups=[[...selected]];
- $('channels').replaceChildren();m.channels.forEach(name=>{const l=document.createElement('label'),c=document.createElement('input');c.type='checkbox';c.checked=selected.includes(name);c.dataset.name=name;c.onchange=channelSelectionChanged;l.append(c,document.createTextNode(' '+name));$('channels').append(l)});filterChannels();
+ $('channels').replaceChildren();m.channels.forEach(name=>{const l=document.createElement('label'),c=document.createElement('input');c.type='checkbox';c.checked=selected.includes(name);c.dataset.name=name;c.onchange=channelSelectionChanged;l.append(c,document.createTextNode(' '+channelLabel(name)));$('channels').append(l)});filterChannels();
  $('time').value=m.start.slice(11,19);overview=[];$('plots').dataset.layout='';showModeInfo();setView(0,Math.max(m.duration,1),0);loadOverview();eventSyncReady=false;serverRevision=0;refreshSharedEvents(true);loadFeedbackRuns();$('feedback-comparison').replaceChildren();$('device-metrics').replaceChildren();loadDeviceMetrics();renderDetectionChoices();renderDisplayChoices();reviewedTypeSelection.clear();renderReviewChoices();$('review-mode').value='spot';$('review-start').value=$('review-end').value='';$('package-result').textContent='';$('package-open').hidden=true;pendingPackage=null;if($('package-dialog').open)$('package-dialog').close();
+ resizeSidebar();restoreFileView();if(!fileSwitching){let entry=fileLibrary.find(f=>f.file_id===m.file_id);if(!entry){entry={id:++librarySerial,name:m.name,file_id:m.file_id,file:null};fileLibrary.push(entry)}activeLibraryId=entry.id;renderFileLibrary()}
 }
-$('file').onchange=async e=>{const file=e.target.files[0];if(!file)return;$('status').textContent='正在读取和检查 CSV，请稍候…';try{serial++;controller?.abort();clearTimeout(timer);await init(await api('/api/open',{method:'POST',headers:{'X-Filename':encodeURIComponent(file.name)},body:file}))}catch(e){error(e);$('status').textContent='文件打开失败'}finally{$('file').value=''}};
+$('file').onchange=async e=>{const files=[...e.target.files];if(!files.length)return;if(fileSwitching||scanning||eventSaving||packageSaving){error('请等待扫描、保存或文件切换完成后再添加');e.target.value='';return}const added=[];for(const file of files){let entry=fileLibrary.find(f=>f.file&&f.name===file.name&&f.file.size===file.size&&f.file.lastModified===file.lastModified);if(!entry){entry={id:++librarySerial,name:file.name,file,file_id:null};fileLibrary.push(entry)}else entry.file=file;added.push(entry)}renderFileLibrary();try{await switchLibraryFile(added[0].id)}finally{e.target.value=''}};
+function rememberFileView(){if(!meta)return;try{localStorage.setItem('respiratory-view-v1:'+meta.file_id,JSON.stringify({view,selected,groups,displayMode,window:$('window').value,time:$('time').value}))}catch(e){/* View preference storage must not block annotation or switching. */}}
+function restoreFileView(){if(!meta)return;try{const saved=JSON.parse(localStorage.getItem('respiratory-view-v1:'+meta.file_id)||'null');if(!saved||!Array.isArray(saved.view)||saved.view.length!==2||!saved.view.every(Number.isFinite)||saved.view[1]<=saved.view[0])return;selected=Array.isArray(saved.selected)?saved.selected.filter(n=>meta.channels.includes(n)):selected;groups=Array.isArray(saved.groups)?saved.groups.filter(Array.isArray).map(g=>g.filter(n=>selected.includes(n))):[[...selected]];reconcileGroups();displayMode=['raw','engineering'].includes(saved.displayMode)?saved.displayMode:displayMode;showModeInfo();$('channels').querySelectorAll('input').forEach(c=>c.checked=selected.includes(c.dataset.name));filterChannels();if(saved.window)$('window').value=saved.window;if(saved.time)$('time').value=saved.time;generation++;serial++;controller?.abort();cache=null;data={};overviewImage=null;$('plots').dataset.layout='';setView(...saved.view,0);loadOverview()}catch(e){/* Invalid preferences fall back to the normal initial view. */}}
+function renderFileLibrary(){const host=$('file-list');host.replaceChildren();const query=$('file-search').value.trim().toLowerCase();for(const entry of fileLibrary){if(!entry.name.toLowerCase().includes(query))continue;const row=document.createElement('div');row.className='library-row';const button=document.createElement('button');button.type='button';button.className='library-file';button.textContent=(entry.id===activeLibraryId?'● ':'')+entry.name+(entry.error?' · 打开失败':'');button.title=entry.name+(entry.file_id?'\n内容指纹：'+entry.file_id:'\n点击时读取');button.disabled=fileSwitching;button.setAttribute('aria-pressed',String(entry.id===activeLibraryId));button.onclick=()=>switchLibraryFile(entry.id);const close=document.createElement('button');close.type='button';close.className='library-close';close.textContent='×';close.title='关闭文件，不删除CSV和标记';close.setAttribute('aria-label','关闭文件 '+entry.name);close.disabled=fileSwitching;close.onclick=()=>closeLibraryFile(entry.id);row.append(button,close);host.append(row)}$('file-library-count').textContent=fileLibrary.length+' 份';}
+async function closeLibraryFile(id){
+ if(fileSwitching)return;
+ if(scanning||eventSaving||packageSaving||$('event-dialog').open||$('package-dialog').open)return error('请先完成扫描、保存或关闭编辑窗口，再关闭文件');
+ const entry=fileLibrary.find(f=>f.id===id);if(!entry)return;
+ if(id===activeLibraryId){const next=fileLibrary.find(f=>f.id!==id&&!f.error)||fileLibrary.find(f=>f.id!==id);
+  if(next){await switchLibraryFile(next.id);if(activeLibraryId===id)return;}
+  else{fileSwitching=true;renderFileLibrary();rememberFileView();try{await api('/api/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_id:meta.file_id})});clearCurrentFileView()}catch(e){error(e);return}finally{fileSwitching=false}}
+ }
+ if(entry.file_id)try{await api('/api/cache/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_id:entry.file_id})})}catch(e){/* A failed cache release must not remove saved annotations. */}
+ entry.file=null;fileLibrary=fileLibrary.filter(f=>f.id!==id);renderFileLibrary();$('status').textContent=meta?'已关闭 '+entry.name+'；原始CSV和标记保留。':'所有文件已关闭，可重新添加CSV；标记和查看位置保留。';
+}
+function clearCurrentFileView(){generation++;serial++;feedbackSerial++;historySerial++;controller?.abort();clearTimeout(timer);meta=null;annotations=null;activeLibraryId=null;eventSyncReady=false;serverRevision=0;selected=[];groups=[];data={};overview=[];cache=null;overviewImage=null;hover=null;drag=null;markSelection=null;eventDraft=null;pendingPackage=null;lastPackageFileId=null;
+ for(const id of ['plots','channels','feedback-run','feedback-comparison','device-metrics','scan-result','package-result'])$(id).replaceChildren();
+ $('plots').dataset.layout='';$('info').textContent='尚未加载文件，请添加CSV';$('mode-note').textContent='请选择一份或多份CSV';$('channel-count').textContent='已选 0 / 0';$('range').textContent='';$('error').textContent='';$('package-open').hidden=true;if($('scan-history-dialog').open)$('scan-history-dialog').close();const canvas=$('overview');canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);renderEventList();
+}
+
+async function switchLibraryFile(id){
+ const entry=fileLibrary.find(f=>f.id===id);if(!entry||fileSwitching)return;
+ if(scanning||eventSaving||packageSaving||$('event-dialog').open||$('package-dialog').open)return error('请先完成扫描、保存或关闭当前标记/导出窗口，再切换文件');
+ if(id===activeLibraryId&&entry.file_id===meta?.file_id)return;
+ fileSwitching=true;renderFileLibrary();rememberFileView();$('status').textContent='正在读取 '+entry.name+' …';
+ try{const active=fileLibrary.find(f=>f.id===activeLibraryId);if(active&&!active.file&&meta?.file_id===active.file_id){const response=await fetch('/api/current-csv?file_id='+encodeURIComponent(active.file_id));if(!response.ok)throw Error('原文件已切换，请刷新后重新选择');active.file=new File([await response.blob()],active.name,{type:'text/csv'})}
+ serial++;controller?.abort();clearTimeout(timer);let m,cacheHit=false;
+ if(entry.file_id){const cached=await api('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_id:entry.file_id})});if(cached.hit){m=cached.meta;cacheHit=true}}
+ if(!m){if(!entry.file)throw Error('此文件不在缓存中，请用“添加CSV”重新选择');$('status').textContent='首次读取或缓存已释放，正在解析 '+entry.name+' …';m=await api('/api/open',{method:'POST',headers:{'X-Filename':encodeURIComponent(entry.file.name)},body:entry.file})}
+ const duplicate=fileLibrary.find(f=>f.id!==entry.id&&f.file_id===m.file_id);if(duplicate){duplicate.file=entry.file;duplicate.name=entry.name;fileLibrary=fileLibrary.filter(f=>f.id!==entry.id);activeLibraryId=duplicate.id}else{entry.file_id=m.file_id;entry.error=null;activeLibraryId=entry.id}
+ await init(m);$('status').textContent=(cacheHit?'已从缓存快速切换到 ':'已读取 ')+m.name+'，已恢复该文件的标记与查看设置。';
+ }catch(e){entry.error=e.message;error(e);$('status').textContent='文件切换失败，原有标记未删除';if(meta)loadWave(true)}finally{fileSwitching=false;renderFileLibrary()}
+}
+$('file-search').oninput=renderFileLibrary;
+window.addEventListener('beforeunload',rememberFileView);
 $('all').onclick=()=>meta&&setView(0,Math.max(meta.duration,1));
 $('channel-search').oninput=filterChannels;
 $('selected-only').onchange=filterChannels;
@@ -169,7 +208,7 @@ function drawEventBands(ctx,w,h,range,channels,compact=false){
  events.forEach((e,i)=>{const a=Math.max(left,X(e.start)),b=Math.min(w-16,X(e.end)),color=eventColors[e.type];ctx.fillStyle=color+'28';ctx.fillRect(a,12,Math.max(1,b-a),h-40);ctx.strokeStyle=color;ctx.setLineDash([]);ctx.strokeRect(a,12,Math.max(1,b-a),h-40);if(!compact&&b-a>45){ctx.fillStyle=color;ctx.font='11px Microsoft YaHei';ctx.fillText(e.type+' '+(e.end-e.start).toFixed(2)+'s',a+3,24+(i%3)*13)}});
  if(markSelection&&markSelection.mode===displayMode&&!compact){const a=X(Math.min(markSelection.start,markSelection.end)),b=X(Math.max(markSelection.start,markSelection.end));ctx.fillStyle='#167c8938';ctx.fillRect(a,12,b-a,h-40)}ctx.restore();
 }
-function openEventEditor(start,end,channels,event=null){if(!annotations)return error('事件保存不可用，请刷新或重启查看器');eventDraft=event?{...event}: {id:crypto.randomUUID(),mode:displayMode};$('event-dialog-title').textContent=event?'修改事件标记':'新建事件标记';$('event-start').value=start.toFixed(3);$('event-end').value=Math.min(end,eventDraft.mode==='engineering'?meta.display_duration:meta.raw_duration).toFixed(3);$('event-type').value=event?.type||'波形异常';$('event-note').value=event?.note||'';$('event-error').textContent='';$('event-axis-note').textContent=eventDraft.mode==='engineering'?'当前标记基于估算展开时间，持续时间仅供人工复核，不是已验证的采样计时。':'当前标记基于文件原始时间轴，时间戳本身可能只有秒级精度。';$('event-channels').replaceChildren();meta.channels.forEach(name=>{const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=name;input.checked=channels.includes(name);label.append(input,document.createTextNode(name));$('event-channels').append(label)});updateEventDuration();$('event-dialog').showModal()}
+function openEventEditor(start,end,channels,event=null){if(fileSwitching)return error('文件正在切换，请稍候再标记');if(!annotations)return error('事件保存不可用，请刷新或重启查看器');eventDraft=event?{...event}: {id:crypto.randomUUID(),mode:displayMode};$('event-dialog-title').textContent=event?'修改事件标记':'新建事件标记';$('event-start').value=start.toFixed(3);$('event-end').value=Math.min(end,eventDraft.mode==='engineering'?meta.display_duration:meta.raw_duration).toFixed(3);$('event-type').value=event?.type||'波形异常';$('event-note').value=event?.note||'';$('event-error').textContent='';$('event-axis-note').textContent=eventDraft.mode==='engineering'?'当前标记基于估算展开时间，持续时间仅供人工复核，不是已验证的采样计时。':'当前标记基于文件原始时间轴，时间戳本身可能只有秒级精度。';$('event-channels').replaceChildren();meta.channels.forEach(name=>{const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=name;input.checked=channels.includes(name);label.append(input,document.createTextNode(name));$('event-channels').append(label)});updateEventDuration();$('event-dialog').showModal()}
 function updateEventDuration(){const a=Number($('event-start').value),b=Number($('event-end').value);$('event-duration').textContent=Number.isFinite(a)&&Number.isFinite(b)?eventClock(a)+' — '+eventClock(b)+' · 持续 '+(b-a).toFixed(3)+' 秒':''}
 function renderEventList(){
  const list=$('event-list');list.replaceChildren();
@@ -250,6 +289,7 @@ async function commitShared(mutate){
 
 let scanning=false;
 async function scanRecording(whole){
+ if(fileSwitching)return error('文件正在切换，请稍候再扫描');
  if(!meta||!eventSyncReady)return error('请先打开文件并等待标记同步完成');
  if(scanning||eventSaving)return;
  const minDuration=Number($('scan-duration').value),ratio=Number($('scan-ratio').value)/100;
@@ -295,7 +335,7 @@ $('display-types-none').onclick=()=>{visibleEventTypes.clear();renderDisplayChoi
 async function loadFeedbackRuns(preferred){
  if(!meta)return;const fileId=meta.file_id;
  const serial=++feedbackSerial;
- try{const old=preferred||$('feedback-run').value,query=new URLSearchParams({file_id:fileId,limit:10,selected:old||''}),packet=await api('/api/scans?'+query);if(meta.file_id!==fileId||serial!==feedbackSerial)return;const select=$('feedback-run');select.replaceChildren();
+ try{const old=preferred||$('feedback-run').value,query=new URLSearchParams({file_id:fileId,limit:10,selected:old||''}),packet=await api('/api/scans?'+query);if(meta?.file_id!==fileId||serial!==feedbackSerial)return;const select=$('feedback-run');select.replaceChildren();
  const runs=[...packet.scans];if(packet.selected&&!runs.some(r=>r.run_id===packet.selected.run_id))runs.unshift(packet.selected);
  for(const run of runs){const option=document.createElement('option');option.value=run.run_id;option.textContent=scanLabel(run,true);option.title=scanLabel(run);select.append(option)}
  if([...select.options].some(o=>o.value===old))select.value=old;
@@ -334,11 +374,11 @@ async function exportFeedback(kind){
  if(eventSaving||scanning)return error('请等待当前保存或扫描完成');
  const startText=$('review-start').value,endText=$('review-end').value;
  if(kind==='reviewed'&&(!startText||!endText||!$('reviewer').value.trim()))return error('请填写校验人和实际已检查的起止秒数');
- try{const args=kind==='reviewed'?reviewExportArgs():{file_id:meta.file_id,run_id:$('feedback-run').value};const fid=meta.file_id,packet=await api('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...args,kind})});if(meta.file_id!==fid)return;downloadJsonPacket(packet,kind==='automatic'?'automatic':'reviewed')}catch(e){error(e)}
+ try{const args=kind==='reviewed'?reviewExportArgs():{file_id:meta.file_id,run_id:$('feedback-run').value};const fid=meta.file_id,packet=await api('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...args,kind})});if(meta?.file_id!==fid)return;downloadJsonPacket(packet,kind==='automatic'?'automatic':'reviewed')}catch(e){error(e)}
 }
 let reviewedTypeSelection=new Set(),pendingPackage=null,packageSaving=false,lastPackageFileId=null;
 function renderReviewChoices(){const host=$('review-type-options');host.replaceChildren();for(const type of Object.keys(eventColors)){const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=type;input.checked=reviewedTypeSelection.has(type);input.onchange=()=>{if(input.checked)reviewedTypeSelection.add(type);else reviewedTypeSelection.delete(type);$('review-type-summary').textContent=reviewedTypeSelection.size?'已选 '+reviewedTypeSelection.size+' 类':'请选择实际检查的类型'};label.append(input,document.createTextNode(type));host.append(label)}$('review-type-summary').textContent=reviewedTypeSelection.size?'已选 '+reviewedTypeSelection.size+' 类':'请选择实际检查的类型'}
-function reviewExportArgs(){if(!meta||!$('feedback-run').value)throw Error('请先选择对应的自动扫描批次');if(!$('review-start').value||!$('review-end').value||!$('reviewer').value.trim())throw Error('请填写校验人和实际检查范围');if(!reviewedTypeSelection.size)throw Error('请勾选实际检查过的事件类型');return {file_id:meta.file_id,run_id:$('feedback-run').value,reviewer:$('reviewer').value.trim(),reviewed_range:[Number($('review-start').value),Number($('review-end').value)],reviewed_types:[...reviewedTypeSelection],review_mode:$('review-mode').value||'spot'}}
+function reviewExportArgs(){if(fileSwitching)throw Error('文件正在切换，请稍候再导出');if(!meta||!$('feedback-run').value)throw Error('请先选择对应的自动扫描批次');if(!$('review-start').value||!$('review-end').value||!$('reviewer').value.trim())throw Error('请填写校验人和实际检查范围');if(!reviewedTypeSelection.size)throw Error('请勾选实际检查过的事件类型');return {file_id:meta.file_id,run_id:$('feedback-run').value,reviewer:$('reviewer').value.trim(),reviewed_range:[Number($('review-start').value),Number($('review-end').value)],reviewed_types:[...reviewedTypeSelection],review_mode:$('review-mode').value||'spot'}}
 $('export-package').onclick=async()=>{if(scanning||eventSaving||packageSaving)return error('请等待扫描或保存完成');const button=$('export-package');button.disabled=true;try{const args=reviewExportArgs(),preview=await api('/api/feedback/prepare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(args)});if(meta?.file_id!==args.file_id)return;pendingPackage={...args,expected_revision:preview.revision};$('package-preview').textContent='文件：'+preview.file_name+'\n批次：'+preview.run_id+'\n校验人：'+preview.reviewer+'\n原始时间：第 '+preview.reviewed_range.join(' — ')+' 秒\n检查类型：'+preview.reviewed_types.join('、')+'\n检查方式：'+(preview.review_mode==='complete'?'完整检查所选类型，包含主动补标漏检':'逐条复核；其余空白区间保持未知')+'\n范围内标记 '+preview.event_count+' 条，其中已确认 '+preview.confirmed_count+' 条、待复核 '+preview.pending_count+' 条；跨边界 '+preview.boundary_count+' 条单独记录，不直接训练。\n保存位置：'+preview.folder+'\n\n原始CSV只存一份；自动JSON按批次复用。校验JSON仅保存所选区间/类型，不重复嵌入整份自动快照和全文件历史；相同内容重复保存会复用。';$('package-agree').checked=false;$('package-save').disabled=true;$('package-error').textContent='';$('package-dialog').showModal()}catch(e){error(e)}finally{button.disabled=false}};
 $('package-agree').onchange=()=>{$('package-save').disabled=!$('package-agree').checked};
 $('package-cancel').onclick=()=>{if(!packageSaving){pendingPackage=null;$('package-dialog').close()}};
@@ -349,3 +389,9 @@ $('feedback-refresh').onclick=()=>loadFeedbackRuns();$('export-automatic').oncli
 $('review-current-range').onclick=()=>{if(!meta)return;$('review-start').value=Math.min(view[0],meta.raw_duration).toFixed(3);$('review-end').value=Math.min(view[1],meta.raw_duration).toFixed(3)};
 $('compare-feedback').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{if(!meta)throw Error('请先打开对应原始CSV');if(file.size>50*1024*1024)throw Error('反馈JSON请小于50MB');const packet=JSON.parse(await file.text()),rows=compareReviewed(packet,meta),host=$('feedback-comparison');host.replaceChildren();const summary=document.createElement('p');summary.textContent='校验人：'+packet.reviewer+' · 程序：'+packet.app_version+' · 比较结果 '+rows.length+' 条（只读查看）';host.append(summary);for(const item of rows){const row=document.createElement('div');row.className='event-row';const text=document.createElement('div');text.className='event-text';text.textContent=item.result+' · '+item.event.type+' · '+eventClock(item.event.start)+' — '+eventClock(item.event.end);if(item.original){const original=document.createElement('small');original.textContent='自动原区间：'+item.original.start+'—'+item.original.end+'秒 · '+item.original.type;text.append(original)}const button=document.createElement('button');button.textContent='查看波形';button.onclick=()=>jumpEvent(item.event);row.append(text,button);host.append(row)}}catch(err){error(err)}finally{e.target.value=''}};
 api('/api/health').then(p=>{$('app-version').textContent='版本 '+p.app_version+' · 本机运行 · 研发试用'}).catch(()=>{});
+
+let sidebarFrame=0;
+function resizeSidebar(){const sidebar=document.querySelector('.channel-sidebar');if(!sidebar)return;const top=Math.max(16,sidebar.getBoundingClientRect().top);sidebar.style.setProperty('--sidebar-height',Math.max(120,window.innerHeight-top-16)+'px')}
+function scheduleSidebarResize(){if(sidebarFrame)return;sidebarFrame=requestAnimationFrame(()=>{sidebarFrame=0;resizeSidebar()})}
+window.addEventListener('scroll',scheduleSidebarResize,{passive:true});
+window.addEventListener('resize',scheduleSidebarResize);
