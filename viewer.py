@@ -19,6 +19,14 @@ from detector import detect, DETECTABLE_TYPES, VERSION
 from app_version import APP_VERSION, APP_ID
 from feedback_export import scoped_review,save_package,folder_for
 from recording_cache import RecordingCache
+from signal_analysis import analyze_recording
+from company_rules import pressure_flow,amplitude_channel,Q_CHANNEL,A_CHANNEL,FLOW_A_CHANNEL,settings as company_settings
+from adaptive_test import amplitude_channel as test_amplitude,A_CHANNEL as TEST_A_CHANNEL,settings as test_settings,VERSION as TEST_VERSION
+from multifeature_test import CHANNELS as MULTI_CHANNELS, VERSION as MULTI_VERSION, settings as multi_settings, waveform_channels as multi_channels
+from dynamic_baseline_web import CHANNELS as DYNAMIC_CHANNELS, WINDOWS as DYNAMIC_WINDOWS, VERSION as DYNAMIC_VERSION, waveform_channels as dynamic_channels, analyze as dynamic_analyze
+from dynamic_baseline_detector import settings as baseline_settings, VERSION as BASELINE_VERSION
+from dynamic_baseline_v2 import CHANNELS as OPTIMIZED_CHANNELS, VERSION as OPTIMIZED_VERSION, settings as optimized_settings, waveform_channels as optimized_channels
+from dynamic_baseline_v3 import CHANNELS as V3_CHANNELS, VERSION as V3_VERSION, settings as v3_settings, waveform_channels as v3_channels
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, '_MEIPASS', ROOT))
@@ -82,6 +90,9 @@ class Recording:
             self.channels['气压1−气压3（补偿）'] = self.channels['气压1'] - self.channels['气压3']
             self.channels['气压2−气压3（补偿）'] = self.channels['气压2'] - self.channels['气压3']
             self.channels['气压1−气压2（差压）'] = self.channels['气压1'] - self.channels['气压2']
+            self.channels[Q_CHANNEL]=pressure_flow(self.channels['气压1−气压3（补偿）'],self.channels['气压2−气压3（补偿）'])
+            self.channels[A_CHANNEL]=amplitude_channel(seconds,self.channels[Q_CHANNEL],float(seconds[-1]))
+        if '流量' in self.channels:self.channels[FLOW_A_CHANNEL]=amplitude_channel(seconds,self.channels['流量'],float(seconds[-1]))
         self.engineering = {}
         for raw_name in ('气压1', '气压2'):
             compensated = raw_name + '−气压3（补偿）'
@@ -111,12 +122,57 @@ class Recording:
                             recorded_seconds=len(bins),pressure_nominal_hz=50,pressure_reported_hz=[47,48],
                             computed_flow_leak_reported_hz=30,computed_rate_verified=False,uniform_sampling_verified=False,
                             note='每秒行数是记录密度，不等于独立采样或更新频率；重复值不能据此推断为未更新。机器总流量与瞬时总漏气率单位均为L/min，不相减；不按50Hz重采样或插值。'))
+        if FLOW_A_CHANNEL in self.channels:
+            self.meta['channel_units'][FLOW_A_CHANNEL]='L/min'
+            self.meta['channel_roles'][FLOW_A_CHANNEL]='直接取CSV流量的前5秒最大值−最小值，每秒末端更新'
+        if Q_CHANNEL in self.channels:
+            self.meta['channel_units'][Q_CHANNEL]='L/min（暂定）'
+            self.meta['channel_roles'][Q_CHANNEL]='已减气压3的P1/P2公式推算Q；与CSV流量一致性未验证'
+            self.meta['channel_units'][A_CHANNEL]='L/min（暂定）'
+            self.meta['channel_roles'][A_CHANNEL]='公司判定同源A：前5个完整源秒Qmax−Qmin，每秒末端更新；不足窗口或无效数据留空'
         self.meta.update(display_duration=float(self.display_x[-1]), engineering_gaps=reference_gaps,
                          engineering_gap_threshold=threshold, engineering_byte_column=byte_column,
                          engineering_pressure_compensated='气压1' in self.engineering,
                          raw_duration=self.meta['duration'], raw_gaps=self.gaps)
+        if '流量' in self.channels:
+            self.channels[TEST_A_CHANNEL]=test_amplitude(self)
+            self.meta['channels'].append(TEST_A_CHANNEL)
+            self.meta['channel_units'][TEST_A_CHANNEL]='L/min'
+            self.meta['channel_roles'][TEST_A_CHANNEL]='CSV流量2%～98%分位、5秒因果范围；相对冻结参考判定，实际门限见事件依据'
+            self.meta['adaptive_test_version']=TEST_VERSION
+            # Dynamic traces are computed lazily with the requested scan settings.
+            # One shared placeholder avoids copying the CSV for unused channels.
+            placeholder=np.full(len(self.x),np.nan)
+            for name in MULTI_CHANNELS:
+                self.channels[name]=placeholder
+                self.meta['channels'].append(name)
+                self.meta['channel_units'][name]='%' if name in ('多特征剩余比例','多特征下降百分比') else 'L/min'
+                self.meta['channel_roles'][name]='当前多特征测试参数对应的原始秒级计算值；不是原设备通道'
+            self.meta['multifeature_test_version']=MULTI_VERSION
+            for name in DYNAMIC_CHANNELS:
+                self.channels[name]=placeholder
+                self.meta['channels'].append(name)
+                self.meta['channel_units'][name]='%' if name.endswith('剩余比例') else 'L/min'
+                self.meta['channel_roles'][name]='动态基线检测派生曲线；方法和窗口由检测方案选择，输入为机器流量'
+            self.meta['dynamic_baseline_version']=DYNAMIC_VERSION
+            self.meta['dynamic_baseline_windows']=list(DYNAMIC_WINDOWS)
+            self.meta['dynamic_baseline_detector_version']=BASELINE_VERSION
+            for name in OPTIMIZED_CHANNELS:
+                self.channels[name]=placeholder
+                self.meta['channels'].append(name)
+                self.meta['channel_units'][name]='%' if '剩余比例' in name else 'L/min'
+                self.meta['channel_roles'][name]='优化测试版派生曲线；1秒复核与主窗口分开，背景估计不是患者流量'
+            self.meta['dynamic_baseline_optimized_version']=OPTIMIZED_VERSION
+            for name in V3_CHANNELS:
+                self.channels[name]=placeholder
+                self.meta['channels'].append(name)
+                self.meta['channel_units'][name]='%' if '剩余比例' in name else 'L/min'
+                self.meta['channel_roles'][name]='优化v3派生曲线；弱事件按主窗口连续判定，漏气变化保留作复核提示'
+            self.meta['dynamic_baseline_optimized_v3_version']=V3_VERSION
+            self.meta['dynamic_baseline_optimized_v3_windows']=list(range(1,11))
+            self.meta['dynamic_baseline_optimized_v3_durations']=list(range(5,11))
 
-    def wave(self, start, end, names, pixels, mode='raw'):
+    def wave(self, start, end, names, pixels, mode='raw',test_duration=7,test_ratio=.5,dynamic_method='absolute_mean',optimized_method=None,optimized_duration=10):
         if mode not in ('raw', 'engineering'):
             raise ValueError('不支持的显示模式')
         x = self.display_x if mode == 'engineering' else self.x
@@ -127,10 +183,14 @@ class Recording:
         hi = int(np.searchsorted(x, end, side='right'))
         lo, hi = max(0, lo - 1), min(len(x), hi + 1)
         result = {}
+        dynamic=multi_channels(self,test_duration,test_ratio) if any(n in MULTI_CHANNELS for n in names) else {}
+        if any(n in DYNAMIC_CHANNELS for n in names):dynamic.update(dynamic_channels(self,names,dynamic_method))
+        if any(n in OPTIMIZED_CHANNELS for n in names):dynamic.update(optimized_channels(self,names,dynamic_method if optimized_method is None else optimized_method))
+        if any(n in V3_CHANNELS for n in names):dynamic.update(v3_channels(self,names,dynamic_method if optimized_method is None else optimized_method,optimized_duration))
         for name in names:
             if name not in self.channels:
                 continue
-            y = self.engineering.get(name, self.channels[name]) if mode == 'engineering' else self.channels[name]
+            y = dynamic[name] if name in dynamic else self.engineering.get(name, self.channels[name]) if mode == 'engineering' else self.channels[name]
             # Min/max envelope preserves narrow peaks, unlike uniform subsampling.
             size = max(1, int(np.ceil((hi - lo) / max(100, min(pixels, 9000)))))
             block = y[lo:hi]
@@ -227,7 +287,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(current.wave(float(q['start'][0]), float(q['end'][0]),
                                               q.get('channel', list(current.channels)[:3]),
                                               int(q.get('pixels', ['1200'])[0]),
-                                              q.get('mode', ['raw'])[0]))
+                                              q.get('mode', ['raw'])[0],
+                                              float(q.get('test_duration',['7'])[0]),float(q.get('test_ratio',['.5'])[0]),
+                                              q.get('dynamic_method',['absolute_mean'])[0],q.get('optimized_method',[None])[0],float(q.get('optimized_duration',['10'])[0])))
             self.send({'error': '不存在的地址'}, 404)
         except Exception as exc:
             self.send({'error': str(exc)}, 400)
@@ -239,6 +301,28 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin != 'http://' + self.headers.get('Host', ''):
             return self.send({'error': '不允许跨站请求'}, 403)
         try:
+            if urlparse(self.path).path=='/api/dynamic-baseline':
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<10000:raise ValueError('对照分析请求大小无效')
+                args=json.loads(self.rfile.read(length))
+                with recording_lock:
+                    current=recording
+                    if current is None or args.get('file_id')!=current.meta['file_id']:raise Conflict('当前文件已切换')
+                result=dynamic_analyze(current,args.get('start',0),args.get('end'),args.get('method','absolute_mean'),args.get('window','both'))
+                with recording_lock:
+                    if recording is not current:raise Conflict('分析期间文件已切换，本次结果已丢弃')
+                return self.send(result)
+            if urlparse(self.path).path=='/api/analyze':
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<10000:raise ValueError('分析请求大小无效')
+                args=json.loads(self.rfile.read(length))
+                with recording_lock:
+                    current=recording
+                    if current is None or args.get('file_id')!=current.meta['file_id']:raise Conflict('当前文件已切换')
+                analysis=analyze_recording(current,args.get('start',0),args.get('end'),args.get('max_examples',10),args.get('profile','device_candidates'),args.get('flow_source','pressure_q'),args.get('reduction_ratio'),args.get('dynamic_method'),args.get('window_seconds'),args.get('min_duration'))
+                with recording_lock:
+                    if recording is not current:raise Conflict('分析期间文件已切换，请重新读取')
+                return self.send(analysis)
             if urlparse(self.path).path in ('/api/activate','/api/cache/release'):
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<1000:raise ValueError('缓存请求大小无效')
@@ -304,6 +388,12 @@ class Handler(BaseHTTPRequestHandler):
                     if types is not None and (not isinstance(types,list) or not types or any(t not in DETECTABLE_TYPES[profile] for t in types)):raise ValueError('检测类型无效')
                     settings=dict(version=VERSION if profile=='engineering' else 'machine-flow-candidates-v2',profile=profile,
                                   min_duration=args.get('min_duration',10),reduction_ratio=args.get('reduction_ratio',.3),event_types=types or list(DETECTABLE_TYPES[profile]))
+                    if profile=='company_rules':settings=company_settings(args.get('min_duration',7),types,args.get('flow_source','pressure_q'))
+                    if profile=='adaptive_test':settings=test_settings(args.get('min_duration',7),args.get('reduction_ratio',.5),types)
+                    if profile=='adaptive_multifeature':settings=multi_settings(args.get('min_duration',7),args.get('reduction_ratio',.5),types)
+                    if profile=='dynamic_baseline':settings=baseline_settings(args.get('min_duration',10),types,args.get('dynamic_method') or 'centered_rms',2 if args.get('window_seconds') is None else args['window_seconds'])
+                    if profile=='dynamic_baseline_v2':settings=optimized_settings(args.get('min_duration',10),types,args.get('dynamic_method'),args.get('window_seconds'))
+                    if profile=='dynamic_baseline_v3':settings=v3_settings(args.get('min_duration',10),types,args.get('dynamic_method'),args.get('window_seconds'))
                     return self.send(dict(match=event_store.matching_scan(current.meta['file_id'],args.get('start',0),args.get('end',current.meta['raw_duration']),settings)))
             if urlparse(self.path).path == '/api/feedback':
                 length=int(self.headers.get('Content-Length','0'))
@@ -329,14 +419,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not scan_lock.acquire(blocking=False):
                     raise Conflict('已有扫描正在进行，请等待完成')
                 try:
-                    result = detect(current,args.get('start',0),args.get('end'),args.get('min_duration',10),args.get('reduction_ratio',.3),args.get('profile','engineering'),args.get('event_types'))
+                    result = detect(current,args.get('start',0),args.get('end'),args.get('min_duration',7 if args.get('profile') in ('company_rules','adaptive_test','adaptive_multifeature') else 10),args.get('reduction_ratio',.5 if args.get('profile') in ('adaptive_test','adaptive_multifeature') else .3),args.get('profile','engineering'),args.get('event_types'),args.get('flow_source','pressure_q'),args.get('dynamic_method'),args.get('window_seconds'))
                     saved=[];skipped=0;event_links={}
                     for e in result['events']:
                         duplicate=False
                         for old in previous['events']+saved:
                             overlap=max(0,min(old['end'],e['end'])-max(old['start'],e['start']))
                             span=max(old['end'],e['end'])-min(old['start'],e['start'])
-                            if old['id']==e['id'] or (old['source']=='detector' and old['type']==e['type'] and old['mode']==e['mode'] and overlap/span>=.5):
+                            old_amplitude=old.get('detection_profile')=='company_rules' or old['type'].startswith('公司') or '公司规则试验' in old['note']
+                            same_input=old_amplitude==(e.get('detection_profile')=='company_rules') and (not old_amplitude or old.get('detection_input','pressure_q')==e.get('detection_input','pressure_q'))
+                            if e.get('detection_profile') in ('adaptive_test','adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3') or old.get('detection_profile') in ('adaptive_test','adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'):same_input=False  # exact IDs only; keep experiments with different settings separate
+                            if old['id']==e['id'] or (old['source']=='detector' and same_input and old['type']==e['type'] and old['mode']==e['mode'] and overlap/span>=.5):
                                 duplicate=True;event_links[e['id']]=old['id'];break
                         if duplicate:skipped+=1
                         else:saved.append(e)

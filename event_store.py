@@ -1,6 +1,7 @@
 """Shared, revision-checked local storage for browser and MCP annotations."""
 import json
 import math
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -9,7 +10,8 @@ import uuid
 import hashlib
 from app_version import APP_VERSION
 
-TYPES = ('疑似暂停', '疑似低通气', '漏气', '波形异常', '伪迹/干扰', '其他', '呼吸波动减弱', '总漏气升高', '数据缺失', '信号异常', '流量波动近消失候选', '流量波动减弱候选')
+TYPES = ('疑似暂停', '疑似低通气', '漏气', '波形异常', '伪迹/干扰', '其他', '呼吸波动减弱', '总漏气升高', '数据缺失', '信号异常', '流量波动近消失候选', '流量波动减弱候选', '公司暂停候选', '公司低通气候选','测试近消失候选','测试减弱候选')
+TYPES += ('强度显著下降候选','强度减弱候选')
 
 
 def scan_fingerprint(start,end,settings):
@@ -17,6 +19,7 @@ def scan_fingerprint(start,end,settings):
     defaults=['流量波动近消失候选','流量波动减弱候选','总漏气升高','数据缺失','信号异常'] if profile=='device_candidates' else ['呼吸波动减弱','总漏气升高','数据缺失','信号异常']
     key=[float(start),float(end),settings.get('version'),profile,float(settings.get('min_duration',10)),
          float(settings.get('reduction_ratio',.3)),sorted(set(settings.get('event_types',defaults)))]
+    if profile in ('dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'):key += [settings.get('method'),settings.get('window_seconds')]
     return hashlib.sha256(json.dumps(key,ensure_ascii=False).encode()).hexdigest()
 
 
@@ -46,8 +49,41 @@ def validate_event(e, meta):
     status = e.get('status', 'candidate' if source in ('agent','detector') else 'reviewed')
     if source not in ('manual', 'agent', 'detector') or status not in ('candidate', 'reviewed', 'ignored'):
         raise ValueError('事件来源或复核状态无效')
-    return {**{k: e[k] for k in ('id', 'start', 'end', 'mode', 'type', 'note', 'updated_at')},
+    result={**{k: e[k] for k in ('id', 'start', 'end', 'mode', 'type', 'note', 'updated_at')},
             'channels': list(dict.fromkeys(e['channels'])), 'source': source, 'status': status}
+    if source=='detector':
+        profile=e.get('detection_profile')
+        if profile is None:profile='company_rules' if e['type'].startswith('公司') or '公司规则试验' in e['note'] else 'device_candidates' if e['type'].startswith('流量波动') else 'engineering'
+        if profile not in ('company_rules','device_candidates','engineering','adaptive_test','adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'):raise ValueError('事件检测方案来源无效')
+        result['detection_profile']=profile
+        if 'detection_input' in e:
+            if e['detection_input'] not in ('csv_flow','pressure_q'):raise ValueError('检测输入来源无效')
+            result['detection_input']=e['detection_input']
+        if profile in ('adaptive_test','adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'):
+            version=e.get('detection_version')
+            if version is None:
+                match=re.search(r'adaptive-flow-test-v[\w-]+',e['note']);version=match.group(0) if match else 'unknown'
+            if not isinstance(version,str) or len(version)>80:raise ValueError('测试算法版本无效')
+            result['detection_version']=version
+        if profile in ('dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'):
+            method=e.get('detection_method');window=e.get('detection_window_seconds')
+            if method not in (('absolute_mean','centered_rms','detrended_abs') if profile in ('dynamic_baseline_v2','dynamic_baseline_v3') else ('absolute_mean','centered_rms')) or isinstance(window,bool) or window not in (range(1,11) if profile=='dynamic_baseline_v3' else (2,5,8)):raise ValueError('动态基线方法或窗口无效')
+            result.update(detection_method=method,detection_window_seconds=window)
+            if profile=='dynamic_baseline_v3' and 'detection_min_duration' in e:
+                duration=e['detection_min_duration']
+                if isinstance(duration,bool) or not isinstance(duration,(int,float)) or not math.isfinite(duration) or duration not in range(5,11):raise ValueError('优化v3最短持续应为5～10秒整数')
+                result['detection_min_duration']=duration
+        if profile in ('adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3') and 'evidence' in e:
+            evidence=e['evidence']
+            if not isinstance(evidence,dict) or evidence.get('schema')!=1:
+                raise ValueError('检测依据格式无效')
+            try:
+                encoded=json.dumps(evidence,ensure_ascii=False,allow_nan=False)
+            except (ValueError,TypeError,RecursionError) as exc:
+                raise ValueError('检测依据必须为有限JSON数据') from exc
+            if len(encoded)>10000:raise ValueError('检测依据过长')
+            result['evidence']=json.loads(encoded)
+    return result
 
 
 class EventStore:
@@ -69,7 +105,9 @@ class EventStore:
     def _index_scan(db,snapshot):
         summary={k:snapshot[k] for k in ('run_id','created_at','app_version','settings','scan_start','scan_end')}
         summary['detected_count']=len(snapshot.get('events',[]))
-        label='设备候选' if snapshot['settings'].get('profile')=='device_candidates' else '工程筛查'
+        label={'device_candidates':'设备候选','company_rules':'公司规则试验','adaptive_test':'自适应测试（旧版）','adaptive_multifeature':'多特征自适应测试'}.get(snapshot['settings'].get('profile'),'工程筛查')
+        if snapshot['settings'].get('profile') in ('dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'):label=({'dynamic_baseline_v2':'动态基线优化v2','dynamic_baseline_v3':'动态基线优化v3'}.get(snapshot['settings']['profile'],'动态基线'))+' / '+{'centered_rms':'去均值RMS','detrended_abs':'去背景绝对值','absolute_mean':'绝对值均值'}[snapshot['settings']['method']]+f' / {snapshot["settings"]["window_seconds"]}秒'
+        if snapshot['settings'].get('profile')=='dynamic_baseline_v3':label+=f' / 持续≥{snapshot["settings"].get("min_duration",10)}秒'
         title=f"{label} {snapshot['scan_start']:g}—{snapshot['scan_end']:g}秒"
         db.execute('INSERT INTO scan_info VALUES (?,?,?,?,?,?,?)',(snapshot['run_id'],snapshot['file_id'],snapshot['created_at'],title,0,
                    scan_fingerprint(snapshot['scan_start'],snapshot['scan_end'],snapshot['settings']),json.dumps(summary,ensure_ascii=False)))

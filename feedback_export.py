@@ -17,7 +17,13 @@ def scoped_review(meta,automatic,current,reviewer,reviewed_range,reviewed_types,
     if not isinstance(reviewed_types,list) or not reviewed_types or any(not isinstance(t,str) or t not in TYPES for t in reviewed_types):raise ValueError('请至少勾选一种实际检查过的事件类型')
     if review_mode not in ('spot','complete'):raise ValueError('请指定逐条复核或完整检查')
     types=sorted(set(reviewed_types))
-    relevant=lambda e:e['type'] in types and e['start']<b and e['end']>a
+    config=automatic.get('settings',{})
+    def same_configuration(e):
+        if config.get('profile') not in ('dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3') or e.get('source')!='detector':return True
+        return (e.get('detection_profile')==config['profile'] and e.get('detection_method')==config['method']
+                and e.get('detection_window_seconds')==config['window_seconds'] and e.get('detection_version')==config['version']
+                and (config['profile']!='dynamic_baseline_v3' or e.get('detection_min_duration',e.get('evidence',{}).get('minimum_duration',10))==config.get('min_duration',10)))
+    relevant=lambda e:e['type'] in types and e['start']<b and e['end']>a and same_configuration(e)
     inside=lambda e:e['start']>=a and e['end']<=b
     selected=[e for e in current['events'] if relevant(e)]
     # Estimated engineering coordinates cannot establish raw-second coverage.

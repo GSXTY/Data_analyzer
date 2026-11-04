@@ -1,7 +1,8 @@
 /* Shared validation and persistence for manual waveform annotations. */
 (function(root){
  'use strict';
- const types=['疑似暂停','疑似低通气','漏气','波形异常','伪迹/干扰','其他','呼吸波动减弱','总漏气升高','数据缺失','信号异常','流量波动近消失候选','流量波动减弱候选'];
+ const types=['疑似暂停','疑似低通气','漏气','波形异常','伪迹/干扰','其他','呼吸波动减弱','总漏气升高','数据缺失','信号异常','流量波动近消失候选','流量波动减弱候选','公司暂停候选','公司低通气候选','测试近消失候选','测试减弱候选'];
+ types.push('强度显著下降候选','强度减弱候选');
  class AnnotationModel{
   constructor(meta,storage){this.meta=meta;this.storage=storage;this.key='respiratory-events-v1:'+meta.file_id;this.items=[]}
   validate(event){
@@ -17,7 +18,18 @@
    if(typeof event.id!=='string'||!event.id||event.id.length>100)throw Error('事件编号无效');
    const source=event.source||'manual',status=event.status||(['agent','detector'].includes(source)?'candidate':'reviewed');
    if(!['manual','agent','detector'].includes(source)||!['candidate','reviewed','ignored'].includes(status))throw Error('事件来源或状态无效');
-   return {id:event.id,start,end,type:event.type,note:event.note,channels:[...new Set(event.channels)],mode:event.mode,source,status,updated_at:typeof event.updated_at==='string'?event.updated_at:new Date().toISOString()};
+   const result={id:event.id,start,end,type:event.type,note:event.note,channels:[...new Set(event.channels)],mode:event.mode,source,status,updated_at:typeof event.updated_at==='string'?event.updated_at:new Date().toISOString()};
+   if(source==='detector'){const profile=event.detection_profile??(event.type.startsWith('公司')||event.note.includes('公司规则试验')?'company_rules':event.type.startsWith('流量波动')?'device_candidates':'engineering');if(!['company_rules','device_candidates','engineering','adaptive_test','adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'].includes(profile))throw Error('事件检测方案来源无效');result.detection_profile=profile}
+   if(source==='detector'&&event.detection_input!==undefined){if(!['csv_flow','pressure_q'].includes(event.detection_input))throw Error('检测输入来源无效');result.detection_input=event.detection_input}
+   if(source==='detector'&&['adaptive_test','adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'].includes(result.detection_profile)){const version=event.detection_version??event.note.match(/adaptive-flow-test-v[\w-]+/)?.[0]??'unknown';if(typeof version!=='string'||version.length>80)throw Error('测试算法版本无效');result.detection_version=version}
+   if(source==='detector'&&['dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'].includes(result.detection_profile)){const method=event.detection_method,window=event.detection_window_seconds;if(!(['dynamic_baseline_v2','dynamic_baseline_v3'].includes(result.detection_profile)?['absolute_mean','centered_rms','detrended_abs']:['absolute_mean','centered_rms']).includes(method)||!Number.isInteger(window)||!(result.detection_profile==='dynamic_baseline_v3'?window>=1&&window<=10:[2,5,8].includes(window)))throw Error('动态基线方法或窗口无效');result.detection_method=method;result.detection_window_seconds=window}
+   if(source==='detector'&&result.detection_profile==='dynamic_baseline_v3'&&event.detection_min_duration!==undefined){const duration=event.detection_min_duration;if(!Number.isInteger(duration)||duration<5||duration>10)throw Error('优化v3最短持续应为5～10秒整数');result.detection_min_duration=duration}
+   if(source==='detector'&&['adaptive_multifeature','dynamic_baseline','dynamic_baseline_v2','dynamic_baseline_v3'].includes(result.detection_profile)&&event.evidence!==undefined){
+    const evidence=event.evidence;
+    const finite=v=>{if(typeof v==='number'&&!Number.isFinite(v))throw Error('检测依据必须为有限数值');if(v&&typeof v==='object')Object.values(v).forEach(finite)};
+    if(!evidence||typeof evidence!=='object'||Array.isArray(evidence)||evidence.schema!==1)throw Error('检测依据格式无效');finite(evidence);const encoded=JSON.stringify(evidence);if(encoded.length>10000)throw Error('检测依据过长');result.evidence=JSON.parse(encoded);
+   }
+   return result;
   }
   commit(items){const checked=items.map(x=>this.validate(x));if(new Set(checked.map(x=>x.id)).size!==checked.length)throw Error('事件编号重复');this.storage.setItem(this.key,JSON.stringify({version:1,file_id:this.meta.file_id,events:checked}));this.items=checked}
   load(){const raw=this.storage.getItem(this.key);if(!raw)return;const packet=JSON.parse(raw);if(packet.version!==1||packet.file_id!==this.meta.file_id||!Array.isArray(packet.events))throw Error('保存的标记文件格式不兼容');const checked=packet.events.map(e=>this.validate(e));if(new Set(checked.map(e=>e.id)).size!==checked.length)throw Error('保存的事件编号重复');this.items=checked}

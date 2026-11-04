@@ -1,0 +1,41 @@
+const assert=require('node:assert/strict'),vm=require('node:vm'),{readFileSync}=require('node:fs');
+const {AnnotationModel}=require('../annotation-model.js');
+const elements=new Map();
+function element(){return {value:'',textContent:'',clientWidth:1000,children:[],dataset:{},style:{},checked:false,addEventListener(){},setAttribute(){},replaceChildren(){this.children=[]},append(...v){this.children.push(...v)},querySelectorAll(){return []}}}
+const context=vm.createContext({document:{getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},createElement:element,createTextNode:text=>({textContent:text})},window:{addEventListener(){}},fetch(){return new Promise(()=>{})},URLSearchParams,AbortController,requestAnimationFrame(){return 1},setTimeout(){return 1},clearTimeout(){},console,devicePixelRatio:1});
+vm.runInContext(readFileSync('viewer.js','utf8'),context);
+vm.runInContext(`
+meta={file_id:'file-a',start:'2026-11-02 00:00:00',raw_duration:200,dynamic_baseline_version:'dynamic-baseline-comparison-v1',dynamic_baseline_detector_version:'dynamic-baseline-detector-v1',channels:['流量',...allDynamicNames]};
+const common={type:'强度显著下降候选',source:'detector',status:'candidate',start:50,end:65,channels:['流量'],note:'test',mode:'raw',detection_profile:'dynamic_baseline'};
+annotations={items:[{...common,id:'two',detection_method:'centered_rms',detection_window_seconds:2},{...common,id:'eight',detection_method:'centered_rms',detection_window_seconds:8},{...common,id:'absolute',detection_method:'absolute_mean',detection_window_seconds:2},{...common,id:'manual',source:'manual',detection_profile:undefined}]};
+selected=['流量'];groups=[['流量']];$('scan-profile').value='dynamic_baseline';$('baseline-method').value='centered_rms';$('baseline-window').value='2';
+filterChannels=()=>{};loadWave=()=>{};render=()=>{};setView=(a,b)=>{view=[a,b]};
+$('scan-profile').onchange();
+`,context);
+const read=code=>vm.runInContext(code,context);
+const ids=()=>JSON.parse(read('JSON.stringify(visibleEvents(annotations.items).map(e=>e.id))'));
+assert.equal(read('activeResultGroup'),'baseline');assert.deepEqual(ids(),['two']);
+assert.equal(read("$('scan-duration').value"),10);assert.equal(read("$('scan-duration').disabled"),true);
+assert.equal(read("$('scan-ratio-label').hidden"),true);assert.equal(read('chosenDetectionTypes.size'),4);
+read("$('show-company-a').onclick()");
+assert.equal(read('dynamicMethod()'),'centered_rms');assert.equal(read('baselineArgs().window_seconds'),2);
+assert.equal(read("selected.includes('动态2秒强度')"),true);assert.equal(read("selected.includes('动态8秒强度')"),false);
+read("$('baseline-window').value='8';$('baseline-window').onchange()");
+assert.deepEqual(ids(),['eight']);assert.equal(read("selected.includes('动态8秒强度')"),true);
+read("annotations.items.push({...common,id:'five',detection_method:'centered_rms',detection_window_seconds:5});$('baseline-window').value='5';$('baseline-window').onchange()");
+assert.deepEqual(ids(),['five']);assert.equal(read("selected.includes('动态5秒强度')"),true);assert.equal(read("selected.includes('动态8秒强度')"),false);
+assert.equal(read('baselineArgs().window_seconds'),5);
+read("$('baseline-all-configs').checked=true;$('baseline-all-configs').onchange()");assert.deepEqual(ids(),['two','eight','absolute','five']);
+read("$('result-manual').onclick()");assert.deepEqual(ids(),['manual']);
+read("$('scan-profile').value='adaptive_multifeature';$('scan-profile').onchange()");assert.equal(read("$('scan-duration').disabled"),false);assert.equal(read("$('scan-duration').value"),7);
+
+const storage={getItem(){return null},setItem(){}},meta={file_id:'test',raw_duration:200,display_duration:200,channels:['流量']};
+const model=new AnnotationModel(meta,storage),event={id:'dynamic',start:50,end:65,mode:'raw',type:'强度显著下降候选',source:'detector',status:'candidate',channels:['流量'],note:'original',detection_profile:'dynamic_baseline',detection_input:'csv_flow',detection_version:'dynamic-baseline-detector-v1',detection_method:'centered_rms',detection_window_seconds:2,evidence:{schema:1,reference_amplitude:20,remaining_ratio_max:.2}};
+model.save(event);model.save({...model.items[0],status:'reviewed',start:51,note:'human'});
+assert.equal(model.items[0].detection_method,'centered_rms');assert.equal(model.items[0].detection_window_seconds,2);assert.deepEqual(model.items[0].evidence,event.evidence);
+assert.throws(()=>model.save({...event,detection_window_seconds:'both'}));
+assert.throws(()=>model.save({...event,detection_method:'patient_flow'}));
+assert.deepEqual(model.export().events[0].evidence,event.evidence);
+model.save({...event,id:'five',detection_window_seconds:5});model.save({...model.items.find(e=>e.id==='five'),status:'reviewed'});
+assert.equal(model.export().events.find(e=>e.id==='five').detection_window_seconds,5);
+console.log('PASS: saved baseline profile, independent method/window filtering, fixed 10s, matching plots, unified controls, reviewed metadata and JSON export');

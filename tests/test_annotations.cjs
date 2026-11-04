@@ -27,3 +27,11 @@ feedback.events=[{...base,status:'ignored'}];assert.match(compareReviewed(feedba
 console.log('PASS: feedback comparison, immutable original range and cross-file rejection');
 assert.doesNotThrow(()=>compareReviewed({...feedback,version:2,reviewed_types:['疑似暂停'],review_mode:'spot'},meta));
 console.log('PASS: compact scoped v2 feedback remains readable alongside legacy v1');
+const evidence={schema:1,reference_amplitude:20,near_threshold:2,confirmed_at:9,review_flags:['待复核']};
+const v3={...base,id:'v3',detection_profile:'adaptive_multifeature',detection_input:'csv_flow',detection_version:'adaptive-flow-test-v3-multifeature',evidence};
+model.save(v3);model.save({...model.items.find(e=>e.id==='v3'),type:'其他',note:'人工改类型',status:'reviewed'});
+const annotated=model.items.find(e=>e.id==='v3');
+assert.deepEqual(annotated.evidence,evidence);assert.equal(annotated.detection_version,v3.detection_version);
+const roundtrip=new AnnotationModel(meta,storage);roundtrip.load();assert.deepEqual(roundtrip.items.find(e=>e.id==='v3').evidence,evidence);
+assert.throws(()=>model.save({...v3,evidence:{schema:1,value:Infinity}}));
+console.log('PASS: multi-feature evidence/version survive edits, export and reload');

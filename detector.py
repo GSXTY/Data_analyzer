@@ -8,6 +8,12 @@ import pandas as pd
 
 VERSION = 'machine-flow-v1'
 DETECTABLE_TYPES = {
+    'dynamic_baseline_v3': ('强度显著下降候选','强度减弱候选','数据缺失','信号异常'),
+    'dynamic_baseline_v2': ('强度显著下降候选','强度减弱候选','数据缺失','信号异常'),
+    'dynamic_baseline': ('强度显著下降候选','强度减弱候选','数据缺失','信号异常'),
+    'adaptive_multifeature': ('测试近消失候选','测试减弱候选','数据缺失','信号异常'),
+    'adaptive_test': ('测试近消失候选','测试减弱候选','数据缺失','信号异常'),
+    'company_rules': ('公司暂停候选','公司低通气候选','数据缺失','信号异常'),
     'engineering': ('呼吸波动减弱','总漏气升高','数据缺失','信号异常'),
     'device_candidates': ('流量波动近消失候选','流量波动减弱候选','总漏气升高','数据缺失','信号异常'),
 }
@@ -18,12 +24,34 @@ def runs(mask):
     return zip(np.flatnonzero(bounds == 1), np.flatnonzero(bounds == -1))
 
 
-def detect(recording, start=0, end=None, min_duration=10, reduction_ratio=.3, profile='engineering', event_types=None):
+_DEFAULT=object()
+
+def detect(recording, start=0, end=None, min_duration=_DEFAULT, reduction_ratio=_DEFAULT, profile='engineering', event_types=None,flow_source='pressure_q',dynamic_method=None,window_seconds=None):
     """Analyze all original rows, aggregate within source seconds, preserve gaps.
 
     Both flow and leak are total machine signals; no subtraction or patient-flow
     reconstruction is attempted. Timing is source-second resolution, not 50 Hz.
     """
+    if min_duration is _DEFAULT:min_duration=7 if profile in ('adaptive_test','adaptive_multifeature') else 10
+    if reduction_ratio is _DEFAULT:reduction_ratio=.5 if profile in ('adaptive_test','adaptive_multifeature') else .3
+    if profile=='dynamic_baseline':
+        from dynamic_baseline_detector import detect as dynamic_detect
+        return dynamic_detect(recording,start,end,min_duration,event_types,'centered_rms' if dynamic_method is None else dynamic_method,2 if window_seconds is None else window_seconds)
+    if profile=='dynamic_baseline_v2':
+        from dynamic_baseline_v2 import detect as optimized_detect
+        return optimized_detect(recording,start,end,min_duration,event_types,dynamic_method,window_seconds)
+    if profile=='dynamic_baseline_v3':
+        from dynamic_baseline_v3 import detect as optimized_detect
+        return optimized_detect(recording,start,end,min_duration,event_types,dynamic_method,window_seconds)
+    if profile=='adaptive_multifeature':
+        from multifeature_test import detect as multifeature_detect
+        return multifeature_detect(recording,start,end,min_duration,reduction_ratio,event_types)
+    if profile=='adaptive_test':
+        from adaptive_test import detect as adaptive_detect
+        return adaptive_detect(recording,start,end,min_duration,reduction_ratio,event_types)
+    if profile=='company_rules':
+        from company_rules import detect_company
+        return detect_company(recording,start,end,min_duration,event_types,flow_source)
     duration=recording.meta['raw_duration']
     if profile not in ('engineering','device_candidates'):
         raise ValueError('未知检测方案')
@@ -90,7 +118,7 @@ def detect(recording, start=0, end=None, min_duration=10, reduction_ratio=.3, pr
         key=json.dumps([recording.meta['file_id'],settings['version'],a,b,kind,settings],sort_keys=True)
         identifier='det-'+hashlib.sha256(key.encode()).hexdigest()[:32]
         events.append(dict(id=identifier,start=a,end=b,mode='raw',type=kind,channels=channels,
-                           source='detector',status='candidate',updated_at=datetime.now(timezone.utc).isoformat(),
+                           source='detector',status='candidate',detection_profile=profile,updated_at=datetime.now(timezone.utc).isoformat(),
                            note='自动筛查 '+settings['version']+'；机器流量/总漏气；'+evidence+'；原始秒级时间，非临床暂停或AHI判定。'))
     near=np.zeros(len(index),dtype=bool)
     if profile=='device_candidates':
