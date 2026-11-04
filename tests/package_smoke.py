@@ -10,6 +10,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 from datetime import datetime,timedelta
 
 
@@ -76,9 +77,29 @@ def main():
             assert request('/api/close',dict(file_id=fid))['closed']
             request('/api/open',raw=raw_a)
             assert request('/api/events?file_id='+fid)==prior
+            # Exercise both daily algorithms in the frozen app, not just the
+            # historical default; this catches missing bundled engine modules.
+            amplitude=request('/api/detect',dict(file_id=fid,profile='company_rules',flow_source='csv_flow'))
+            assert amplitude['settings']['input_channel']=='流量'
+            assert any(e.get('detection_profile')=='company_rules' for e in amplitude['packet']['events'])
+            v3=request('/api/detect',dict(file_id=fid,profile='dynamic_baseline_v3',dynamic_method='detrended_abs',window_seconds=5,min_duration=10))
+            current=[e for e in v3['packet']['events'] if e.get('detection_profile')=='dynamic_baseline_v3']
+            assert current and all(e['detection_window_seconds']==5 and e['detection_min_duration']==10 for e in current)
+            flexible=request('/api/detect',dict(file_id=fid,profile='dynamic_baseline_v3',dynamic_method='detrended_abs',window_seconds=10,min_duration=5))
+            assert flexible['settings']['window_seconds']==10 and flexible['settings']['min_duration']==5
+            assert any(e.get('detection_profile')=='dynamic_baseline_v3' and e.get('detection_window_seconds')==10 and e.get('detection_min_duration')==5 for e in flexible['packet']['events'])
+            channels=['优化v310秒强度','优化v310秒参考']
+            wave=request('/api/wave?'+urlencode(dict(file_id=fid,start=65,end=125,channel=channels,pixels=600,mode='raw',optimized_method='detrended_abs',optimized_duration=5),doseq=True))
+            assert all(any(point[1] is not None for point in wave['series'][name]) for name in channels)
+            with client.open(f'http://127.0.0.1:{port}/') as response:
+                html=response.read().decode()
+            assert 'event-panel' in html and 'dynamic_baseline_v3' in html
+            with client.open(f'http://127.0.0.1:{port}/viewer.js') as response:
+                assert 'renderEventModeLabel' in response.read().decode()
             print('PASS: standalone Windows EXE starts, serves UI, loads CSV, detects, preserves automatic JSON and exports reviewed JSON/history',flush=True)
             print('PASS: standalone device selection, partial-review confirmation/export dedup and batch archive/snapshot retention',flush=True)
             print('PASS: standalone cached CSV activation, release/close/reopen, annotation retention and Pa/L/min metadata',flush=True)
+            print('PASS: standalone amplitude and configurable baseline v3 detection, derived curves and current event-panel assets',flush=True)
         finally:
             process.terminate();process.communicate(timeout=15)
 if __name__=='__main__':main()
