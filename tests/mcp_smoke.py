@@ -167,7 +167,7 @@ async def main():
                     assert all(any(p[1] is not None for p in points) for points in optimized_wave['series'].values())
                     before_v3=viewer.event_store.read(af)
                     v3=await call('analyze_recording',dict(file_id=af,profile='dynamic_baseline_v3'))
-                    assert v3['read_only'] and v3['settings']['version']=='dynamic-baseline-optimized-v3-configurable-v1'
+                    assert v3['read_only'] and v3['settings']['version']=='dynamic-baseline-optimized-v3-configurable-v13'
                     assert viewer.event_store.read(af)==before_v3
                     v3=await call('detect_events',dict(file_id=af,profile='dynamic_baseline_v3'))
                     assert v3['added']>0

@@ -14,7 +14,7 @@ import pandas as pd
 from dynamic_baseline_comparison import source_seconds
 
 PROFILE='dynamic_baseline_v3'
-VERSION='dynamic-baseline-optimized-v3-configurable-v1'
+VERSION='dynamic-baseline-optimized-v3-configurable-v13'
 WINDOWS=tuple(range(1,11))
 TYPES=('强度显著下降候选','强度减弱候选','数据缺失','信号异常')
 METHODS={'detrended_abs':'去背景绝对值均值÷2（试验）','centered_rms':'窗口去均值RMS（对照）','absolute_mean':'绝对值均值÷2（未去背景）'}
@@ -39,9 +39,9 @@ def settings(min_duration=10,event_types=None,dynamic_method=None,window_seconds
                 background_seconds=30,baseline_seconds=100,min_reference_seconds=30,long_episode_seconds=120,
                 background_estimator='causal previous30 source seconds; raw-sample weighted median, equal total weight per source second',
                 event_types=[t for t in TYPES if event_types is None or t in event_types],flow_source='csv_flow',
-                timing='strong: estimated source-bin coverage; weak: continuous main-window-end interval; no fixed backdating',
+                timing='strong: source-bin coverage after supported flow-tail correction; weak: continuous main-window-end interval',
                 boundary_review_seconds=1,baseline_policy='freeze at main OR 1s remaining<50%; restore valid non-event dips except persistent leak shifts; no leak-only reset',
-                strong_rule=f'1s review <25% continuously >={int(min_duration)}s with main-window support',
+                strong_rule=f'1s review <25% with main-window support and >={int(min_duration)}s after any flow-tail correction',
                 weak_rule=f'selected main-window ratio <50% continuously >={int(min_duration)}s; window-end clock, no fixed backdating',
                 leak_policy='changes >=10 L/min are review hints, not reference resets; no total-leak subtraction',
                 patient_flow_verified=False,leak_subtraction=False,lowpass_1hz=False,clinical_scoring=False,device_control=False)
@@ -88,6 +88,273 @@ def _review_flags(source,start,end):
     return flags,changes
 
 
+def _flow_shape(groups):
+    # Equal weight per source second. Row groups provide shape, not subsecond timestamps.
+    return np.array([[np.median(part) for part in np.array_split(group, 4)] for group in groups])
+
+
+def _early_recovery_evidence(source, raw_groups, end, fast_reference):
+    """Check for a directional departure spanning the last bin and the next bin."""
+    stop = int(end)
+    if stop < 4 or stop >= len(raw_groups):
+        return None
+    indices = slice(stop - 4, stop + 1)
+    if (not np.all(source['valid'][indices])
+            or not np.all(source['segment'][indices] == source['segment'][stop])
+            or any(len(group) < 8 for group in raw_groups[indices])):
+        return None
+    shape = _flow_shape(raw_groups[indices])
+    plateau = shape[:3].ravel()
+    level = float(np.median(plateau))
+    # Require a departure larger than both local variation and a reference-relative floor.
+    threshold = max(2 * np.ptp(plateau), .2 * fast_reference)
+    last, following = shape[-2:] - level
+    direction = np.sign(last[-1])
+    early = direction * last
+    continued = direction * following[:2]
+    if (abs(last[0]) <= threshold and early[-1] > threshold
+            and early[-1] > early[-2] >= early[0]
+            and np.all(continued >= early[-1])):
+        return dict(alternative_end=float(stop-1), plateau_flow=level,
+                    last_second_flow=shape[-2].tolist(), next_second_flow=shape[-1].tolist(),
+                    departure_threshold=float(threshold))
+    return None
+
+
+def _confirm_recovery_cycle(source, raw_groups, end, period, evidence, fast_reference):
+    """Confirm a rise, return and repeated excursion at a compatible cadence."""
+    if period is None:
+        return None
+    first = int(end) - 1
+    limit = min(len(raw_groups), first + math.ceil(1.75 * period) + 1)
+    stop = first
+    while (stop < limit and source['valid'][stop]
+           and source['segment'][stop] == source['segment'][first] and len(raw_groups[stop]) >= 8):
+        stop += 1
+    level = evidence['plateau_flow']
+    direction = np.sign(evidence['last_second_flow'][-1] - level)
+    shape = direction * (_flow_shape(raw_groups[first:stop]).ravel() - level)
+    high = max(2 * evidence['departure_threshold'], fast_reference)
+    low = high / 2
+    peaks = np.flatnonzero(shape >= high)
+    if not len(peaks) or peaks[0] / 4 > period / 2:
+        return None
+    first_crossing = peaks[0]
+    returns = np.flatnonzero(shape[first_crossing+1:] <= low)
+    if not len(returns):
+        return None
+    returned_at = first_crossing + 1 + returns[0]
+    for crossing in peaks[peaks > returned_at]:
+        interval = (crossing - first_crossing) / 4
+        if .65 * period <= interval <= 1.35 * period:
+            return dict(recovery_cycle_seconds=float(interval),
+                        recovery_confirmed_at=float(first + crossing//4 + 1))
+        break
+    return None
+
+
+def _rhythm_reference(groups):
+    if len(groups) < 8 or any(len(group) < 8 for group in groups):
+        return None, None, 0, None
+    shape = _flow_shape(groups).ravel()
+    low, high = np.quantile(shape, [.1, .9])
+    span = high - low
+    if span <= 1e-9:
+        return None, None, 0, None
+    lower = low + .3 * span
+    upper = low + .7 * span
+    crossings = []
+    armed = False
+    for index, value in enumerate(shape):
+        if value <= lower:
+            armed = True
+        elif armed and value >= upper:
+            crossings.append(index)
+            armed = False
+    for i in range(len(crossings)-1, 2, -1):
+        earlier = None
+        for count in range(min(5, i), 2, -1):
+            periods = np.diff(crossings[i-count:i+1]) / 4
+            period = float(np.median(periods))
+            age = (len(shape) - crossings[i]) / 4
+            if not 2 <= period <= 16 or np.max(np.abs(periods-period)) > .25 * period:
+                continue
+            if count >= 4 and i == len(crossings)-1 and age <= 1.5 * period:
+                lows = []
+                for left, right in zip(crossings[i-count:i], crossings[i-count+1:i+1]):
+                    below = np.flatnonzero(shape[left:right] <= lower)
+                    if len(below):
+                        extent = below[-1] - below[0] + 1
+                        if len(below) >= .75 * extent:
+                            lows.append(extent / 4)
+                phase = None
+                if len(lows) >= 4:
+                    typical = float(np.median(lows))
+                    consistent = sum(abs(length-typical) <= .4 * typical for length in lows)
+                    if consistent >= 4:
+                        phase = dict(low_phase_seconds=typical, low_phase_count=int(consistent),
+                                     low_flow_threshold=float(lower), high_flow_threshold=float(upper))
+                return period, 'recent', count, phase
+            if age <= 2 * period and earlier is None:
+                earlier = period, 'earlier', count, None
+        if earlier is not None:
+            return earlier
+    return None, None, 0, None
+
+
+def _normal_low_phase_end(source, raw_groups, start, end, phase):
+    """Require an observed falling edge and sustained low flow before excluding a normal phase."""
+    first = max(0, int(start)-2)
+    stop = min(int(end), int(start) + math.ceil(phase['low_phase_seconds']) + 3)
+    if stop <= start:
+        return start, None
+    segment = source['segment'][int(start)]
+    groups = raw_groups[first:stop]
+    if (not np.all(source['valid'][first:stop])
+            or not np.all(source['segment'][first:stop] == segment)
+            or any(len(group) < 8 for group in groups)):
+        return start, None
+    shape = _flow_shape(groups).ravel()
+    low = phase['low_flow_threshold']
+    high = phase['high_flow_threshold']
+    # Find a high-to-low transition at or just before the estimated onset.
+    onset = 4 * (int(start)-first)
+    high_points = np.flatnonzero(shape[:onset+4] >= high)
+    if not len(high_points):
+        return start, None
+    low_points = np.flatnonzero(shape[high_points[-1]+1:onset+4] <= low)
+    if not len(low_points):
+        return start, None
+    falling = int(high_points[-1]+1+low_points[0])
+    projected = falling + 4 * phase['low_phase_seconds']
+    # Row groups estimate the phase; the reported boundary remains a whole source second.
+    boundary = int(math.floor(projected / 4 + .5))
+    if (first+boundary <= start or 4*(boundary+2) > len(shape)
+            or np.any(shape[falling:4*(boundary+2)] > low)):
+        return start, None
+    return float(first+boundary), float(first+falling//4)
+
+
+def _flow_tail_end(source, raw_groups, start, end, limit):
+    """Estimate a settling tail from ordered rows, reporting only whole seconds."""
+    first, stop = int(start), int(end)
+    if first < 6:
+        return start, False
+    segment = source['segment'][first]
+    history_start = max(0, first - 12)
+    while history_start < first and (
+        not source['valid'][history_start] or source['segment'][history_start] != segment
+    ):
+        history_start += 1
+    if first - history_start < 6:
+        return start, False
+
+    probe_end = min(stop, first + limit + 2)
+    groups = raw_groups[history_start:probe_end]
+    if any(len(group) < 8 for group in groups):
+        return start, False
+    shape = _flow_shape(groups)
+    history_size = first - history_start
+    low, high = np.quantile(shape[:history_size], [.1, .9])
+    reference_range = high - low
+    if reference_range <= 1e-9:
+        return start, False
+
+    edge = shape[history_size:].ravel()
+    for shift in range(min(limit, probe_end - first - 2) + 1):
+        plateau = edge[shift * 4:shift * 4 + 8]
+        if len(plateau) < 8 or np.ptp(plateau) > .05 * reference_range:
+            continue
+        if shift == 0:
+            return start, True
+        level = np.median(plateau)
+        tail = np.r_[shape[history_size - 1, -1], edge[:shift * 4], plateau[0]] - level
+        distance = tail * np.sign(tail[1])
+        tolerance = .02 * reference_range
+        # A single undershoot can settle within the first source second.
+        first_second = tail[1:5] * np.sign(tail[0])
+        if (shift == 1 and abs(tail[0]) >= .2 * reference_range
+                and np.min(first_second) < -tolerance
+                and abs(first_second[-1]) <= .06 * reference_range
+                and np.min(first_second) > -.2 * reference_range
+                and np.argmin(first_second) in (1, 2)):
+            return float(first + shift), True
+        if (distance[0] >= tolerance and distance[1] >= .04 * reference_range
+                and np.all(distance >= -tolerance)
+                and np.all(np.diff(distance) <= tolerance)
+                and np.count_nonzero(np.diff(distance) < -tolerance / 4) >= 3):
+            return float(first + shift), True
+        break
+    return start, False
+
+
+def _weak_onset(source, raw_groups, parent_start, start, lookback, settle_seconds):
+    """Find a sustained contraction of raw flow range after a visible excursion."""
+    first = max(1, int(start) - lookback)
+    stop = int(start) + settle_seconds
+    history_start = max(0, first - 20)
+    segment = source['segment'][int(parent_start)]
+    while history_start < first and (
+        source['segment'][history_start] != segment or not source['valid'][history_start]
+    ):
+        history_start += 1
+    if first - history_start < 6 or stop > len(raw_groups):
+        return start
+    groups = raw_groups[history_start:stop]
+    if (not np.all(source['valid'][history_start:stop])
+            or not np.all(source['segment'][history_start:stop] == segment)
+            or any(len(group) < 8 for group in groups)):
+        return start
+    shape = _flow_shape(groups)
+    history_size = first - history_start
+    span = float(np.diff(np.quantile(shape[:history_size], [.1, .9]))[0])
+    if span <= 1e-9:
+        return start
+    for i in range(first, int(start)):
+        j = i - history_start
+        quiet = shape[j:j+settle_seconds]
+        level = np.median(quiet)
+        if (np.ptp(quiet) <= .45 * span
+                and np.max(np.abs(shape[j-1] - level)) >= .5 * span
+                and np.max(np.abs(shape[j] - level)) <= .25 * span):
+            return float(i)
+    return start
+
+
+def _weak_recovery_start(source, raw_groups, rows, parent_start, start, end, window):
+    """Find a recovered excursion after a quiet stretch, not an isolated level step."""
+    first = int(parent_start)
+    history = [i for i in range(max(0, first-20), first)
+               if source['segment'][i] == source['segment'][first] and len(raw_groups[i]) >= 8]
+    if len(history) < 6:
+        return end
+    low, high = np.quantile(_flow_shape([raw_groups[i] for i in history]), [.1, .9])
+    span = high - low
+    if span <= 1e-9:
+        return end
+    for row in rows:
+        i = row['source_index']
+        if not max(start+3, end-window) <= i < end or row['fast_ratio'] < .6:
+            continue
+        if i+3 > len(raw_groups) or any(
+            source['segment'][j] != source['segment'][i] or len(raw_groups[j]) < 8
+            for j in range(i-3, i+3)
+        ):
+            continue
+        shape = _flow_shape(raw_groups[i-3:i+3])
+        quiet, recovery = shape[:3], shape[3:].ravel()
+        if np.ptp(quiet) > .45 * span:
+            continue
+        offset = recovery - np.median(quiet)
+        peak = int(np.argmax(np.abs(offset)))
+        direction = np.sign(offset[peak])
+        if (peak < 8 and abs(offset[peak]) >= .45 * span
+                and np.max(np.abs(offset[:4])) >= .15 * span
+                and np.any((offset[peak]-offset[peak+1:])*direction >= .30 * span)):
+            return float(i)
+    return end
+
+
 def _leak_steps(source):
     """Only compare adjacent valid source seconds within the same segment."""
     if '漏气量' not in source['med']:return []
@@ -109,7 +376,7 @@ def compute(recording,method=None,window=None,min_duration=10):
     leak_steps=_leak_steps(source)
     traces={n:np.full(size,np.nan) for n in ('strength','reference','remaining','background','fast','fast_reference')}
     history=deque();background_history=deque();short=deque(maxlen=window)
-    episode=None;events=[];previous_segment=None;restored=0;last_tick=0.
+    episode=None;events=[];boundary_rejections=[];previous_segment=None;restored=0;last_tick=0.
     last_background=None;last_background_at=None
     anchor=next((float(v[0]) for v in raw_groups if len(v)),0.)
 
@@ -131,22 +398,69 @@ def compute(recording,method=None,window=None,min_duration=10):
         cores=[v for v in _intervals(rows,lambda r:r['fast_ratio']<.25) if v[1]-v[0]>=duration]
         weak=[[a,min(b,last_tick,recording.meta['raw_duration'])] for a,b in _intervals(rows,lambda r:r['ratio']<.5,clock_end=True)]
         spans=cores or [v for v in weak if v[1]-v[0]>=duration]
+        period = rhythm_basis = phase = None
+        rhythm_count = 0
+        tail_limit = 3
+        if spans:
+            period, rhythm_basis, rhythm_count, phase = _rhythm_reference(raw_groups[parent['rhythm_start']:int(parent['start'])])
+            if period is not None:
+                tail_limit = min(6, max(2, math.ceil(period / 2)))
+        weak_lookback = min(window, math.ceil(period)) if period is not None else window
+        weak_settle = min(6, max(3, math.ceil(period))) if period is not None else 3
         emitted=False
-        for a,b in spans:
+        for span_index,(a,b) in enumerate(spans):
             if parent['pretrigger_at'] is None:continue
+            unadjusted_start = a
+            unadjusted_end = b
+            recovery = recovery_cycle = None
+            onset_search = weak_lookback
+            boundary_period, boundary_basis, boundary_count, boundary_phase = period, rhythm_basis, rhythm_count, phase
+            if cores:
+                a, onset_supported = _flow_tail_end(source, raw_groups, a, b, tail_limit)
+                if reason == '恢复':
+                    recovery = _early_recovery_evidence(source, raw_groups, b, parent['fast_reference'])
+                    if recovery is not None and rhythm_basis == 'recent':
+                        recovery_cycle = _confirm_recovery_cycle(
+                            source, raw_groups, b, period, recovery, parent['fast_reference'])
+                        if recovery_cycle is not None:
+                            b = recovery['alternative_end']
+            else:
+                if span_index == 0 and not parent['reference_censored']:
+                    available = min(window, int(a-events[-1]['end'])) if events else window
+                    if available > 0:
+                        onset_search = min(weak_lookback, available)
+                        a = _weak_onset(source, raw_groups, parent['start'], a, onset_search, weak_settle)
+                        if a == unadjusted_start and onset_search < available:
+                            onset_search = available
+                            a = _weak_onset(source, raw_groups, parent['start'], a, onset_search, weak_settle)
+                if reason == '恢复':
+                    b = _weak_recovery_start(source, raw_groups, rows, parent['start'], unadjusted_start, b, window)
+                if a < parent['start']:
+                    # The window can trigger after the quiet stretch has already started.
+                    # Judge cadence freshness at the observed onset, before that stretch.
+                    boundary_period, boundary_basis, boundary_count, boundary_phase = _rhythm_reference(
+                        raw_groups[parent['rhythm_start']:int(a)])
+            waveform_start = a
+            phase_anchor = None
+            if boundary_phase is not None and (cores or span_index == 0) and not parent['reference_censored']:
+                a, phase_anchor = _normal_low_phase_end(source, raw_groups, a, b, boundary_phase)
+            if b - a < duration:
+                boundary_rejections.append(dict(original=[unadjusted_start,unadjusted_end], corrected=[a,b]))
+                continue
             # The selected main window must provide corroborating evidence.
             support=[r for r in rows if a<=r['tick']-1<b+window and r['ratio']<.5]
             if not support:continue
-            selected=[r for r in rows if a<=(r['tick']-1 if cores else r['tick'])<b]
+            selected=[r for r in rows if (a<=r['tick']-1<b if cores else max(a,unadjusted_start)<=r['tick']<b)]
+            if not selected:continue
             threshold=.25 if cores else .5
             qualified=_intervals(rows,lambda r:r['ratio']<threshold,clock_end=True)
             qualified=[[x,min(y,last_tick,recording.meta['raw_duration'])] for x,y in qualified if min(y,last_tick,recording.meta['raw_duration'])>x]
             extreme=[v for v in _intervals(selected,lambda r:r['fast_ratio']<=.1) if v[1]-v[0]>=duration]
-            confirmed=max(a+duration,support[0]['tick'])
+            confirmed=max(a+duration,support[0]['tick'],unadjusted_start if not cores else a)
             if confirmed>last_tick:continue
             evidence=dict(schema=1,algorithm_version=VERSION,method=method,window_seconds=window,
                 estimated_waveform_interval=[a,b],boundary_duration_seconds=b-a,boundary_resolution_seconds=1,
-                boundary_rule=('连续1秒复核分箱覆盖范围；不是已验证真实生理边界' if cores else f'主窗口剩余<50%连续≥{duration}秒，首次达标窗口末端开始计时；未按W前移，不是真实生理边界'),
+                boundary_rule=('连续1秒复核分箱；检测到流量尾段时从趋稳后计时' if cores else f'主窗口圈定减弱；按原始流量复核起止；修正后仍需≥{duration}秒'),
                 boundary_basis='one_second_review' if cores else 'main_window_end',
                 main_qualified_intervals=qualified[:30],main_interval_count=len(qualified),main_intervals_truncated=len(qualified)>30,
                 main_qualified_total_seconds=sum(y-x for x,y in qualified),main_interval_scope='父过程；多个核心可能共享，不能求和去重',
@@ -162,6 +476,33 @@ def compute(recording,method=None,window=None,min_duration=10):
                 leak_policy='review_only_no_reference_reset',leak_change_context=leak_context[:20],
                 leak_change_count=len(leak_context),leak_context_truncated=len(leak_context)>20)
             evidence.update(background_from_held_estimate=parent['background_held'],background_age_at_trigger_seconds=parent['background_age'])
+            if waveform_start > unadjusted_start:
+                evidence.update(unadjusted_start=unadjusted_start, flow_tail_trim_seconds=waveform_start-unadjusted_start)
+            if phase_anchor is not None:
+                evidence['normal_low_phase_review'] = dict(
+                    **boundary_phase, falling_edge_second=phase_anchor, waveform_start=waveform_start,
+                    delayed_seconds=a-waveform_start)
+            if not cores:
+                evidence.update(rhythm_period_seconds=boundary_period, rhythm_basis=boundary_basis, rhythm_interval_count=boundary_count,
+                                weak_onset_search_seconds=onset_search)
+                if waveform_start < unadjusted_start:
+                    evidence.update(unadjusted_start=unadjusted_start, onset_backtrack_seconds=unadjusted_start-waveform_start)
+            if b < unadjusted_end:
+                evidence.update(unadjusted_end=unadjusted_end, recovery_trim_seconds=unadjusted_end-b)
+            if recovery_cycle is not None:
+                evidence.update(recovery_cycle, recovery_flow_evidence=recovery)
+            if parent['reference_censored']:
+                evidence['review_flags'] = [*flags, '起点参考刚建立，波形下降可能早于标注']
+            if cores:
+                evidence.update(rhythm_period_seconds=period, rhythm_basis=rhythm_basis, rhythm_interval_count=rhythm_count,
+                                flow_tail_search_seconds=tail_limit)
+                if not onset_supported and b-a < duration+tail_limit:
+                    evidence['review_flags'] = [*evidence['review_flags'], '起点待复核：流量趋稳证据不足，起点偏移可能改变是否达标']
+                if b-a == duration and recovery is not None and recovery_cycle is None:
+                    evidence['threshold_boundary_review'] = dict(
+                        **recovery, alternative_duration_seconds=b-a-1)
+                    evidence['review_flags'] = [*evidence['review_flags'],
+                        f'临界待复核：末秒流量已开始持续偏离平台，按较早终点为{duration-1}秒']
             events.append(dict(start=a,end=b,type='强度显著下降候选' if cores else '强度减弱候选',evidence=evidence))
             emitted=True
         # Restore valid rejected dips after recovery. Pressure pulsatility is
@@ -224,7 +565,14 @@ def compute(recording,method=None,window=None,min_duration=10):
         traces['reference'][i]=ref;traces['fast_reference'][i]=fast_ref;traces['remaining'][i]=row['ratio']
         if episode is None:
             if row['ratio']>=.5 and row['fast_ratio']>=.5:accept(row);continue
+            rhythm_start = int(tick) - 1
+            for previous_tick, _, _ in reversed(history):
+                if previous_tick != rhythm_start or int(tick) - 1 - rhythm_start >= 75:
+                    break
+                rhythm_start -= 1
             episode=dict(start=tick-1,reference=ref,fast_reference=fast_ref,background=background,rows=[],pretrigger_count=0,pretrigger_at=None,
+                         rhythm_start=rhythm_start,
+                         reference_censored=i == 0 or not np.isfinite(traces['remaining'][i-1]),
                          background_held=held_background,background_age=None if last_background_at is None else tick-last_background_at)
         elif row['ratio']>=.6 and row['fast_ratio']>=.6:
             close('恢复');accept(row);continue
@@ -232,7 +580,7 @@ def compute(recording,method=None,window=None,min_duration=10):
         episode['pretrigger_count']=episode['pretrigger_count']+1 if row['ratio']<.5 or row['fast_ratio']<.5 else 0
         if episode['pretrigger_count']>=3 and episode['pretrigger_at'] is None:episode['pretrigger_at']=tick
     close('记录末端截断')
-    result=dict(source=source,traces=traces,events=events,restored_seconds=restored,settings=config,leak_steps=leak_steps)
+    result=dict(source=source,traces=traces,events=events,boundary_rejections=boundary_rejections,restored_seconds=restored,settings=config,leak_steps=leak_steps)
     cache[(method,window,duration)]=result
     return result
 
@@ -259,7 +607,7 @@ def detect(recording,start=0,end=None,min_duration=10,event_types=None,dynamic_m
         a,b=original['start'],original['end'];evidence=json.loads(json.dumps(original['evidence'],allow_nan=False))
         if a<start or b>end:evidence['review_flags'].append('跨选区，保留完整估计区间')
         note=(f'动态基线优化测试 {VERSION}；{METHODS[config["method"]]} / {config["window_seconds"]}秒；'
-              f'{"估计波形区间" if evidence["boundary_basis"]=="one_second_review" else "主窗口连续达标区间"} {wall(a)}—{wall(b)}（{b-a:g}秒）；'
+              f'{"估计波形区间" if evidence["boundary_basis"]=="one_second_review" or evidence.get("recovery_trim_seconds") or evidence.get("onset_backtrack_seconds") or evidence.get("normal_low_phase_review") else "主窗口连续达标区间"} {wall(a)}—{wall(b)}（{b-a:g}秒）；'
               f'父过程主窗口达标共{evidence["main_qualified_total_seconds"]:g}秒，与估计时长分开；'
               f'确认时刻{wall(evidence["confirmed_at"])}；背景/参考在预候选期冻结，无事件且质量有效时回填；'
               +(f'存在连续{config["min_duration"]}秒≤10%极低强度标记；' if evidence['extremely_low_strength'] else '')

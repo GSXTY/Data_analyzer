@@ -31,9 +31,12 @@ read("$('selected-only').checked=false;$('scan-profile').value='adaptive_multife
 assert.equal(read('selected.some(n=>allDynamicNames.includes(n))'),false,'old algorithm curves are removed on scheme switch');
 assert(list().includes('多特征参考B'));assert(!list().includes('动态8秒强度'));
 read("$('scan-profile').value='device_candidates';selected=['流量'];view=[10,20];rememberFileView()");
-const key='respiratory-view-v1:a';assert.equal(JSON.parse(saved.get(key)).channelScopeVersion,1);
+const key='respiratory-view-v1:a';assert.equal(JSON.parse(saved.get(key)).channelScopeVersion,2);
 saved.set(key,JSON.stringify({view:[20,40],selected:['流量','温度1','动态2秒强度'],groups:[['流量','温度1','动态2秒强度']]}));
-read('restoreFileView()');assert.deepEqual(JSON.parse(read('JSON.stringify(selected)')),['流量'],'legacy all-channel preferences must not restore obsolete algorithm plots or unrelated fields');
+read("groups=defaultPlotGroups.map(group=>group.filter(n=>meta.channels.includes(n)));selected=groups.flat();restoreFileView()");
+assert.deepEqual(JSON.parse(read('JSON.stringify(groups)')),[['气压1','气压2','控制压力'],['流量'],['漏气量']],'legacy plot preferences use the new layout');
+assert.deepEqual(JSON.parse(read('JSON.stringify(view)')),[20,40],'legacy zoom is preserved');
+assert(read("defaultPlotGroups[0].includes('治疗压')"));
 const html=readFileSync('index.html','utf8');assert(!html.includes('id="dynamic-panel"'));assert(!html.includes('id="dynamic-method"'));assert(html.includes('id="show-all-channels"'));
 assert(!readFileSync('viewer.js','utf8').includes('runDynamic'));
 console.log('PASS: one algorithm entry, matching plots without preview controls, relevant channel defaults, optional search/all, scheme cleanup and legacy preference migration');

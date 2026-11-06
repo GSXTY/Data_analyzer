@@ -8,6 +8,7 @@ import threading
 import webbrowser
 import sys
 import os
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -477,6 +478,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send({'error': str(exc)}, 400)
 
 
+class ViewerHTTPServer(ThreadingHTTPServer):
+    # Windows SO_REUSEADDR can let two listeners bind the same address.
+    if sys.platform == 'win32':
+        allow_reuse_address = False
+
+    def server_bind(self):
+        if sys.platform == 'win32':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main():
     global recording, event_store
     parser = argparse.ArgumentParser()
@@ -491,7 +503,7 @@ def main():
     if args.file and Path(args.file).is_file():
         recording = Recording(Path(args.file).read_bytes(), Path(args.file).name)
     try:
-        server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+        server = ViewerHTTPServer(('127.0.0.1', args.port), Handler)
     except OSError as exc:
         print(f'Cannot start viewer on port {args.port}. Close the previous viewer first. {exc}',flush=True)
         if getattr(sys,'frozen',False):input('Press Enter to close...')

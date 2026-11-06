@@ -6,7 +6,7 @@ vm.runInContext(readFileSync('viewer.js','utf8'),context);
 const read=code=>vm.runInContext(code,context),ids=()=>JSON.parse(read('JSON.stringify(visibleEvents(annotations.items).map(e=>e.id))'));
 (async()=>{
 read(`
-meta={file_id:'f',start:'2026-01-01 00:00:00',raw_duration:200,duration:200,dynamic_baseline_optimized_v3_version:'dynamic-baseline-optimized-v3-configurable-v1',channels:['流量',...allOptimizedNames]};
+meta={file_id:'f',start:'2026-01-01 00:00:00',raw_duration:200,duration:200,dynamic_baseline_optimized_v3_version:'dynamic-baseline-optimized-v3-configurable-v13',channels:['流量',...allOptimizedNames]};
 const base={start:80,end:90,type:'强度显著下降候选',source:'detector',status:'candidate',mode:'raw',note:'test',channels:['流量'],detection_profile:'dynamic_baseline_v3',detection_method:'detrended_abs',detection_window_seconds:1,detection_min_duration:5};
 annotations={items:[{...base,id:'current'},{...base,id:'old-same-config'},{...base,id:'other',detection_profile:'dynamic_baseline_v2'},{...base,id:'manual',source:'manual',status:'reviewed'}]};
 $('baseline-window').options=Array.from({length:10},(_,i)=>({value:String(i+1)}));$('baseline-method').options=[{value:'detrended_abs'}];
@@ -14,7 +14,7 @@ selected=['流量'];groups=[['流量']];eventSyncReady=true;filterChannels=()=>{
 applyShared=p=>{annotations.items=p.events};
 $('scan-profile').value='dynamic_baseline_v3';$('scan-profile').onchange();
 $('baseline-window').value='1';$('baseline-duration').value='5';$('baseline-duration').onchange();
-const configuration={profile:'dynamic_baseline_v3',version:'dynamic-baseline-optimized-v3-configurable-v1',method:'detrended_abs',window_seconds:1,min_duration:5,event_types:['强度显著下降候选']};
+const configuration={profile:'dynamic_baseline_v3',version:'dynamic-baseline-optimized-v3-configurable-v13',method:'detrended_abs',window_seconds:1,min_duration:5,event_types:['强度显著下降候选']};
 let snapshot={settings:configuration,events:[{id:'current'}],event_links:{}},reuse=false;
 api=async(url,options)=>{if(url==='/api/scans/match')return {match:reuse?{run_id:'reuse'}:null};if(url==='/api/feedback')return snapshot;if(url==='/api/detect')return {detected_count:snapshot.events.length,added:0,skipped:snapshot.events.length,eligible_seconds:150,warnings:[],packet:{run_id:'run',events:annotations.items}};throw Error(url)};
 chooseDuplicateScan=async()=> 'reuse';

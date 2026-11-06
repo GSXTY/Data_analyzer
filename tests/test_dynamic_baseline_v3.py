@@ -8,9 +8,10 @@ from urllib.request import build_opener,ProxyHandler,Request
 from urllib.parse import urlencode
 from urllib.error import HTTPError
 import numpy as np
+import pandas as pd
 import viewer
 from viewer import Recording
-from dynamic_baseline_v3 import compute,detect,settings,names,VERSION,waveform_channels
+from dynamic_baseline_v3 import compute,detect,settings,names,VERSION,waveform_channels,_rhythm_reference,_flow_tail_end,_weak_recovery_start,_early_recovery_evidence,_confirm_recovery_cycle,_weak_onset,_normal_low_phase_end
 from event_store import validate_event,scan_fingerprint
 from event_store import EventStore
 from test_adaptive_test import fixture
@@ -29,6 +30,109 @@ def controlled(low=((80,90),),offset=50.,reduced=.2,end=230,gap=None,variable_de
 
 
 class OptimizedV3Tests(unittest.TestCase):
+    def test_normal_low_phase_requires_falling_edge_and_extended_low_flow(self):
+        groups = [np.repeat(values, 3) for values in [[40]*4, [40,35,25,18], [6,1,0,2], [3]*4, [4]*4, [9]*4, [10]*4]]
+        source = dict(valid=np.ones(7,dtype=bool), segment=np.zeros(7))
+        phase = dict(low_phase_seconds=2.25, low_flow_threshold=14., high_flow_threshold=32.)
+        self.assertEqual(_normal_low_phase_end(source, groups, 2, 7, phase), (4., 2.))
+        groups[4] = np.full(12, 40)
+        self.assertEqual(_normal_low_phase_end(source, groups, 2, 7, phase), (2, None))
+
+    def test_rhythm_can_use_a_recently_expired_stable_run_for_onset_review(self):
+        flow = np.zeros((45, 20))
+        for second in (1, 10, 20, 28, 43):
+            flow[second] = 50
+        self.assertEqual(_rhythm_reference(flow), (9., 'earlier', 3, None))
+        self.assertEqual(_rhythm_reference(np.r_[flow, np.zeros((3, 20))]), (None, None, 0, None))
+        regular = np.zeros((28, 20))
+        regular[range(1, 26, 4)] = 50
+        self.assertEqual(_rhythm_reference(regular)[:3], (4., 'recent', 5))
+        phase = json.loads(json.dumps(_rhythm_reference(regular)[3], allow_nan=False))
+        self.assertEqual(phase['low_phase_seconds'], 3.)
+        self.assertEqual(_rhythm_reference(regular[:15]), (4., 'earlier', 3, None))
+
+    def test_weak_onset_backtracks_only_to_a_supported_quiet_transition(self):
+        active = [[0, 20, 40, 20]] * 12
+        quiet = [[10, 11, 12, 11]] * 8
+        groups = [np.repeat(shape, 3) for shape in active + quiet]
+        source = dict(valid=np.ones(20, dtype=bool), segment=np.zeros(20))
+        self.assertEqual(_weak_onset(source, groups, 12, 16, 5, 3), 12.)
+        self.assertEqual(_weak_onset(source, groups, 12, 16, 3, 3), 16.)
+        source['segment'][12:] = 1
+        self.assertEqual(_weak_onset(source, groups, 12, 16, 5, 3), 16.)
+
+    def test_rhythm_requires_repeated_flow_excursions_before_trimming(self):
+        quiet = [[23, 23, 24, 24]] * 3
+        pulse = [[24, 25, 27, 33], [34, 35, 34, 30], [27, 25, 24, 24], [24]*4]
+        groups = [np.repeat(shape, 3) for shape in quiet + pulse * 2]
+        source = dict(valid=np.ones(11, dtype=bool), segment=np.zeros(11), med={})
+        evidence = _early_recovery_evidence(source, groups, 4, 9.)
+        confirmed = _confirm_recovery_cycle(source, groups, 4, 4., evidence, 9.)
+        self.assertEqual(confirmed['recovery_cycle_seconds'], 4.)
+        source['med']['治疗压'] = pd.Series([400]*4 + [500]*7)
+        self.assertEqual(_confirm_recovery_cycle(source, groups, 4, 4., evidence, 9.), confirmed)
+        self.assertIsNone(_confirm_recovery_cycle(source, groups, 4, None, evidence, 9.))
+        self.assertIsNone(_confirm_recovery_cycle(source, groups, 4, 8., evidence, 9.))
+        groups[5:] = [np.full(12, 35)] * 6
+        self.assertIsNone(_confirm_recovery_cycle(source, groups, 4, 4., evidence, 9.))
+
+    def test_early_recovery_requires_flow_to_keep_departing_across_the_boundary(self):
+        shapes = [[23, 23, 24, 24]] * 3 + [[24, 24, 26, 29], [32, 32, 33, 38]]
+        groups = [np.repeat(shape, 3) for shape in shapes]
+        source = dict(valid=np.ones(5, dtype=bool), segment=np.zeros(5))
+        evidence = _early_recovery_evidence(source, groups, 4, 9.)
+        self.assertEqual(evidence['alternative_end'], 3.)
+        groups[-1] = np.full(12, 24)
+        self.assertIsNone(_early_recovery_evidence(source, groups, 4, 9.))
+        groups[-1] = np.full(12, 32)
+        source['segment'][-1] = 1
+        self.assertIsNone(_early_recovery_evidence(source, groups, 4, 9.))
+
+    def test_boundary_review_accepts_a_single_undershoot_and_rejects_a_level_step(self):
+        def groups_from_shapes(shapes):
+            return [np.repeat(shape, 3) for shape in shapes]
+
+        history = [[0, 25, 50, 50]] * 12
+        tail = groups_from_shapes(history + [[24, 18, 21, 20]] + [[21]*4]*10)
+        source = dict(valid=np.ones(23, dtype=bool), segment=np.zeros(23))
+        self.assertEqual(_flow_tail_end(source, tail, 12, 23, 3), (13., True))
+
+        quiet = [[10]*4]*5
+        excursion = [[10, 12, 20, 35], [40, 40, 32, 22], [11, 5, 3, 4]]
+        rows = [dict(source_index=17, fast_ratio=.8)]
+        recovered = groups_from_shapes(history + quiet + excursion + [[10]*4]*3)
+        self.assertEqual(_weak_recovery_start(source, recovered, rows, 12, 13, 21, 8), 17.)
+        step = groups_from_shapes(history + quiet + [[40]*4]*6)
+        self.assertEqual(_weak_recovery_start(source, step, rows, 12, 13, 21, 8), 21.)
+
+    def test_slow_rhythm_extends_search_for_a_supported_tail(self):
+        t = np.arange(48 * 20) / 20
+        history = 20 * np.cos(2 * np.pi * (t - 48) / 10)
+        tail = np.linspace(history[-1], 0, 4 * 20, endpoint=False)
+        groups = np.split(np.r_[history, tail, np.zeros(10 * 20)], 62)
+        source = dict(valid=np.ones(62, dtype=bool), segment=np.zeros(62))
+        period, basis, count, _ = _rhythm_reference(groups[:48])
+        self.assertEqual(basis, 'recent')
+        self.assertGreaterEqual(count, 4)
+        self.assertEqual(period, 10.)
+        self.assertEqual(_flow_tail_end(source, groups, 48, 62, 3), (48, False))
+        self.assertEqual(_flow_tail_end(source, groups, 48, 62, int(period / 2)), (52., True))
+        self.assertEqual(_rhythm_reference([np.zeros(20)] * 45), (None, None, 0, None))
+
+    def test_flow_tail_is_excluded_before_checking_minimum_duration(self):
+        for end, expected in ((91, []), (92, [(82., 92.)])):
+            with self.subTest(end=end):
+                r = controlled(low=((80, end),))
+                tail = (r.x >= 79.75) & (r.x < 82)
+                r.channels['流量'] = np.where(tail, 50 - 2.4 * (82 - r.x), r.channels['流量'])
+                events = detect(r, dynamic_method='centered_rms')['events']
+                self.assertEqual([(e['start'], e['end']) for e in events], expected)
+                if events:
+                    evidence = events[0]['evidence']
+                    self.assertEqual(evidence['unadjusted_start'], 80.)
+                    self.assertEqual(evidence['flow_tail_trim_seconds'], 2.)
+                    self.assertEqual(evidence['confirmed_at'], 92.)
+
     def test_configurable_duration_window_cache_and_provenance(self):
         for w in range(1,11):
             for d in range(5,11):
@@ -61,7 +165,9 @@ class OptimizedV3Tests(unittest.TestCase):
         out=detect(r);events=out['events'];self.assertEqual(len(events),1)
         e=events[0];self.assertEqual(e['type'],'强度减弱候选')
         self.assertEqual(e['evidence']['boundary_basis'],'main_window_end')
-        self.assertEqual((e['start'],e['end']),(85.,112.))
+        self.assertEqual((e['start'],e['end']),(85.,110.))
+        self.assertEqual(e['evidence']['unadjusted_end'],112.)
+        self.assertEqual(e['evidence']['recovery_trim_seconds'],2.)
         traces=compute(r)['traces'];index=np.arange(int(e['start'])-1,int(e['end'])-1)
         self.assertTrue(np.all(traces['remaining'][index]<.5))
         self.assertTrue(np.any(traces['fast'][index]/traces['fast_reference'][index]>.5),'a breathing-phase peak must not veto a main-window weak event')

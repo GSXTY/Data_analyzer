@@ -22,7 +22,17 @@ vm.runInContext("$('scan-types-all').onclick()",context);assert.equal(vm.runInCo
 vm.runInContext("$('scan-profile').value='engineering';$('scan-profile').onchange()",context);assert.equal(vm.runInContext('chosenDetectionTypes.size',context),4);
 vm.runInContext("showDeviceMetrics({by_type:{'流量波动近消失候选':{count:null,duration_seconds:null}},total_candidate_duration_seconds:0})",context);
 assert.ok(elements.get('device-metrics').textContent.includes('未检测'));
-assert.match(readFileSync('viewer.js','utf8'),/const events=visibleEvents\(annotations\?\.items\|\|\[\]\)/,'waveform bands must use the same type/status filter as the list');
+assert.equal(vm.runInContext(`(() => {
+ visibleEventTypes=new Set(['总漏气升高']);$('event-filter').value='reviewed';
+ const previous=annotations;
+ annotations={items:samples.map(e=>({...e,start:2,end:5,channels:['流量']}))};
+ let bands=0;
+ const ctx={save(){},beginPath(){},rect(){},clip(){},restore(){},fillRect(){bands++},strokeRect(){},setLineDash(){},fillText(){}};
+ firstPlotEvents.checked=true;drawEventBands(ctx,300,180,[0,10],['气压1'],true);
+ firstPlotEvents.checked=false;drawEventBands(ctx,300,180,[0,10],['气压1'],true);
+ annotations=previous;
+ return bands;
+})()`,context),1,'the first plot projects one filtered event from another channel, then hides it');
 console.log('PASS: type/status intersection, all/none selection, profile switching, hidden events preserved and unscanned metrics');
 vm.runInContext(`
 const separated=[{id:'old',type:'数据缺失',source:'detector',note:'自动筛查 machine-flow-v1',status:'candidate'},
